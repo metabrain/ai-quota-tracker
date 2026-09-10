@@ -113,3 +113,10 @@ impl QuotaProvider for MyProvider {
 ```
 
 then add it to the `providers` vec in `main()`.
+
+## Contributing
+
+This README is the source of truth for how the daemon behaves — code and docs
+are kept in sync in the same change. All work is tracked by a pre-existing
+GitHub Issue. See [AGENTS.md](AGENTS.md) for the full rules (they apply to human
+and AI contributors alike).
