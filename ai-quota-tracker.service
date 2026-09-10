@@ -1,0 +1,41 @@
+[Unit]
+Description=AI Quota Tracker Daemon (RAM-only, Unix domain socket)
+Documentation=file:///opt/ai-quota-tracker/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as a dedicated low-privilege user. The socket is chmod 600, so any
+# client querying it must run as the same user.
+User=aiquota
+Group=aiquota
+ExecStart=/usr/local/bin/ai-quota-tracker
+# --- Runtime tuning (all optional) ------------------------------------------
+Environment=SOCKET_PATH=/dev/shm/ai_quota_cache.sock
+Environment=TTL_SECONDS=300
+Environment=FETCH_TIMEOUT_SECS=8
+# Set to 0 once real provider API keys are configured below.
+Environment=AI_QUOTA_DEMO=1
+# API keys live in this file (chmod 600, owned by the service user) so they
+# never appear in the unit file or version control.
+EnvironmentFile=-/etc/ai-quota-tracker/keys.env
+# --- Supervision --------------------------------------------------------------
+Restart=on-failure
+RestartSec=2
+# --- Hardening ----------------------------------------------------------------
+# /dev/shm is unaffected by PrivateTmp, so the socket stays visible to clients.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
