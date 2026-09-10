@@ -67,7 +67,7 @@ systemctl status ai-quota-tracker
 | --- | ------ | --------------- |
 | `openai` | `OPENAI_API_KEY` (+ optional `OPENAI_GRANTED_USD`) | Platform billing: trailing-30d USD spend vs your configured grant |
 | `codex` | `~/.codex/auth.json` (from `codex login`, ChatGPT flow) | ChatGPT subscription: plan, 5h + weekly windows, credits |
-| `anthropic` | `ANTHROPIC_OAUTH_TOKEN` or `~/.claude/.credentials.json` (from `claude login`) | Claude Code subscription: 5h + weekly windows |
+| `anthropic` | `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_OAUTH_TOKEN`, or `~/.claude/.credentials.json` from `claude login`) | Claude Code subscription: all OAuth usage windows (`five_hour` → `5h`, `seven_day` → `weekly`, per-model windows, plus any future buckets) |
 
 Codex details:
 - Reads the CLI-owned `auth.json` read-only; token refresh stays with the
