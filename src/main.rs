@@ -100,6 +100,36 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     }))
 }
 
+/// Bind the Unix socket so it is `0600` from the instant it exists.
+///
+/// `bind(2)` applies the process umask to the new socket inode, so a plain
+/// `bind` then `chmod` leaves a window where the socket is reachable with
+/// umask-default perms — and it lives on a world-writable tmpfs. Tightening
+/// umask to `0o177` around the bind closes that window; the explicit
+/// `set_permissions` afterwards is a backstop. Startup is single-threaded in
+/// practice (only our own tasks have run, none creating mode-sensitive files),
+/// so the brief global umask change is safe.
+fn bind_socket_0600(path: &str) -> UnixListener {
+    let prev_umask = unsafe { libc::umask(0o177) };
+    let bound = UnixListener::bind(path);
+    unsafe { libc::umask(prev_umask) };
+
+    let listener = match bound {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("FATAL: cannot bind {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Backstop: only this user may connect.
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        eprintln!("FATAL: cannot chmod 600 {path}: {e}");
+        let _ = fs::remove_file(path);
+        std::process::exit(1);
+    }
+    listener
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -153,19 +183,7 @@ async fn main() {
         .with_state(state);
 
     let _ = fs::remove_file(&config.socket_path);
-    let listener = match UnixListener::bind(&config.socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("FATAL: cannot bind {}: {e}", config.socket_path);
-            std::process::exit(1);
-        }
-    };
-    // Process-level authorization: only this user may connect.
-    if let Err(e) = fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)) {
-        eprintln!("FATAL: cannot chmod 600 {}: {e}", config.socket_path);
-        let _ = fs::remove_file(&config.socket_path);
-        std::process::exit(1);
-    }
+    let listener = bind_socket_0600(&config.socket_path);
     info!(socket = %config.socket_path, "listening on unix socket");
 
     let shutdown = async {
