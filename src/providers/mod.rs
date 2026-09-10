@@ -7,6 +7,7 @@
 
 pub(crate) mod anthropic;
 pub(crate) mod codex;
+pub(crate) mod muse_code;
 pub(crate) mod openai;
 
 use crate::model::{BillingQuota, ProviderQuota, SubscriptionQuota, UsageWindow};
@@ -18,6 +19,9 @@ use std::fmt;
 pub(crate) enum ProviderError {
     /// Missing credentials / unsupported auth mode. Carries a human hint.
     NotConfigured(&'static str),
+    /// Configured, but the provider exposes no quota signal we can report.
+    /// Carries a human-readable explanation (dynamic: may name what we saw).
+    Unsupported(String),
     /// HTTP transport or JSON decode failure.
     Http(reqwest::Error),
     /// Anything else, with context.
@@ -28,6 +32,7 @@ impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProviderError::NotConfigured(hint) => write!(f, "not configured: {hint}"),
+            ProviderError::Unsupported(detail) => write!(f, "unsupported: {detail}"),
             ProviderError::Http(e) => write!(f, "http error: {e}"),
             ProviderError::Unexpected(msg) => write!(f, "unexpected error: {msg}"),
         }

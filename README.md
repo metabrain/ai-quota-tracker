@@ -68,6 +68,7 @@ systemctl status ai-quota-tracker
 | `openai` | `OPENAI_API_KEY` (+ optional `OPENAI_GRANTED_USD`) | Platform billing: trailing-30d USD spend vs your configured grant |
 | `codex` | `~/.codex/auth.json` (from `codex login`, ChatGPT flow) | ChatGPT subscription: plan, 5h + weekly windows, credits |
 | `anthropic` | `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_OAUTH_TOKEN`, or `~/.claude/.credentials.json` from `claude login`) | Claude Code subscription: all OAuth usage windows (`five_hour` → `5h`, `seven_day` → `weekly`, per-model windows, plus any future buckets) |
+| `muse` | `muse login` session (`MUSE_AUTH_PATH` → `$XDG_CONFIG_HOME/muse/auth.json` → `~/.config/muse/auth.json`) | Sign-in / billing state only — see below |
 
 Codex details:
 - Reads the CLI-owned `auth.json` read-only; token refresh stays with the
@@ -77,6 +78,17 @@ Codex details:
 - `CODEX_BASE_URL` overrides `https://chatgpt.com/backend-api` (debugging).
 - API-key mode (`OPENAI_API_KEY` in `auth.json`) has no usage endpoint and is
   reported as not configured.
+
+Muse details:
+- Muse exposes **no quota API** a polling daemon can use: the Model API has
+  no aggregate billing/usage endpoint, and subscription windows are only
+  delivered as SSE events on streaming turns. The provider therefore reports
+  an explicit `unsupported` status instead of synthetic data.
+- It does surface what is observable, read-only: whether the `muse` CLI is
+  installed, whether a `muse login` session exists (the `providers` map in
+  `auth.json` — `{"providers": {}}` means signed out), and billing
+  precedence: `META_API_KEY` moves Muse onto per-token Model API billing
+  ahead of any stored subscription session.
 
 ## Response shape
 

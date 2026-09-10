@@ -20,7 +20,8 @@ use axum::{extract::State, routing::get, Json, Router};
 use cache::{is_stale, refresh_cache, AppState, Cache};
 use model::{unix_now, AiQuotaPayload};
 use providers::{
-    anthropic::AnthropicProvider, codex::CodexProvider, openai::OpenAiProvider, QuotaProvider,
+    anthropic::AnthropicProvider, codex::CodexProvider, muse_code::MuseProvider,
+    openai::OpenAiProvider, QuotaProvider,
 };
 use std::{env, fs, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
 use tokio::{
@@ -127,6 +128,7 @@ async fn main() {
         Arc::new(OpenAiProvider::new(config.demo_mode)),
         Arc::new(CodexProvider::new(config.demo_mode)),
         Arc::new(AnthropicProvider::new(config.demo_mode)),
+        Arc::new(MuseProvider::new(config.demo_mode)),
     ];
 
     let state = Arc::new(AppState {
