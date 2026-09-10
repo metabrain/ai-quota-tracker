@@ -32,6 +32,10 @@ exists **before** the work starts.
   and every commit / PR body includes `Refs #<number>` (or `Closes #<number>`
   on the change that resolves it).
 - The PR description links the Issue and explains how the change was verified.
+- **Trivial fixes** (typos, comments, doc wording, obvious one-liners with no
+  behaviour change) may be committed straight to `main` without a PR. They still
+  reference an Issue with `Refs`/`Closes #<number>` and still keep `README.md`
+  in sync. When in doubt, open a PR.
 
 ## 3. Verification
 
