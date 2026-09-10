@@ -9,18 +9,34 @@ use crate::model::{unix_now, BillingQuota};
 use async_trait::async_trait;
 use std::env;
 
-/// Sum every `data[].amount.value` in an organization-costs response.
-/// Unknown shapes contribute 0 instead of failing the whole provider.
+/// Total USD spend in an organization-costs response.
+///
+/// The live API returns `data[]` as time buckets, each carrying a `results[]`
+/// array of cost line items (`{ amount: { value, currency } }`). We also accept
+/// the amount sitting directly on a `data[]` entry so simpler/mocked shapes and
+/// any future flattening still work. Unknown shapes contribute 0 rather than
+/// failing the whole provider.
+///
+/// One page (`limit=100`, default `1d` buckets) covers the 30-day window, so
+/// pagination via `next_page` is not needed here.
 pub(crate) fn sum_costs(body: &serde_json::Value) -> f64 {
-    body.get("data")
-        .and_then(|d| d.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("amount")?.get("value")?.as_f64())
-                .sum()
-        })
-        .unwrap_or(0.0)
+    let Some(buckets) = body.get("data").and_then(|d| d.as_array()) else {
+        return 0.0;
+    };
+    buckets
+        .iter()
+        .map(
+            |bucket| match bucket.get("results").and_then(|r| r.as_array()) {
+                Some(results) => results.iter().filter_map(amount_value).sum(),
+                None => amount_value(bucket).unwrap_or(0.0),
+            },
+        )
+        .sum()
+}
+
+/// Pull `amount.value` as an f64, if present and numeric.
+fn amount_value(item: &serde_json::Value) -> Option<f64> {
+    item.get("amount")?.get("value")?.as_f64()
 }
 
 pub(crate) struct OpenAiProvider {
@@ -101,7 +117,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sums_all_cost_entries() {
+    fn sums_live_bucketed_shape() {
+        // What /v1/organization/costs actually returns: data[] time buckets,
+        // each with a results[] array of line items.
+        let body = serde_json::json!({
+            "object": "page",
+            "data": [
+                {
+                    "object": "bucket",
+                    "start_time": 1_700_000_000,
+                    "end_time": 1_700_086_400,
+                    "results": [
+                        {"amount": {"value": 1.5, "currency": "usd"}},
+                        {"amount": {"value": 2.25, "currency": "usd"}},
+                    ],
+                },
+                {
+                    "object": "bucket",
+                    "results": [
+                        {"amount": {"value": 0.10, "currency": "usd"}},
+                        {"amount": {"value": 0}},
+                    ],
+                },
+                {"object": "bucket", "results": []},
+            ],
+            "has_more": false,
+            "next_page": null,
+        });
+        let total = sum_costs(&body);
+        assert!((total - 3.85).abs() < 1e-9, "got {total}");
+    }
+
+    #[test]
+    fn sums_flat_amount_on_bucket() {
+        // Simpler shape: amount directly on each data[] entry.
         let body = serde_json::json!({
             "data": [
                 {"amount": {"value": 1.5, "currency": "usd"}},
@@ -109,16 +158,15 @@ mod tests {
                 {"amount": {"value": 0}},
             ]
         });
-        let total = sum_costs(&body);
-        assert!((total - 3.75).abs() < 1e-9, "got {total}");
+        assert!((sum_costs(&body) - 3.75).abs() < 1e-9);
     }
 
     #[test]
     fn ignores_malformed_entries_and_shapes() {
         let body = serde_json::json!({
             "data": [
-                {"amount": {"value": "not-a-number"}},
-                {"amount": {}},
+                {"results": [{"amount": {"value": "not-a-number"}}, {"amount": {}}]},
+                {"amount": {"value": "nope"}},
                 {"nope": true},
                 "a-string",
             ]
