@@ -29,12 +29,12 @@ cargo build --release
 ./target/release/ai-quota-tracker
 
 # with real keys
-OPENAI_API_KEY=sk-... OPENAI_GRANTED_USD=120 AI_QUOTA_DEMO=0 \
+OPENAI_API_KEY=sk-... OPENAI_GRANTED_USD=120 QUOTA_DEMO_MODE=0 \
   ./target/release/ai-quota-tracker
 
 # tuning
-SOCKET_PATH=/dev/shm/ai_quota_cache.sock TTL_SECONDS=300 \
-FETCH_TIMEOUT_SECS=8 ./target/release/ai-quota-tracker
+QUOTA_SOCKET_PATH=/dev/shm/ai_quota_cache.sock QUOTA_CACHE_TTL_SECS=300 \
+QUOTA_FETCH_TIMEOUT_SECS=15 ./target/release/ai-quota-tracker
 ```
 
 ## Query
@@ -61,6 +61,23 @@ sudo systemctl enable --now ai-quota-tracker
 systemctl status ai-quota-tracker
 ```
 
+## Providers
+
+| Key | Source | What it reports |
+| --- | ------ | --------------- |
+| `openai` | `OPENAI_API_KEY` (+ optional `OPENAI_GRANTED_USD`) | Platform billing: trailing-30d USD spend vs your configured grant |
+| `codex` | `~/.codex/auth.json` (from `codex login`, ChatGPT flow) | ChatGPT subscription: plan, 5h + weekly windows, credits |
+| `anthropic` | `ANTHROPIC_OAUTH_TOKEN` or `~/.claude/.credentials.json` (from `claude login`) | Claude Code subscription: 5h + weekly windows |
+
+Codex details:
+- Reads the CLI-owned `auth.json` read-only; token refresh stays with the
+  `codex` CLI (a 401 tells you to run `codex login` again).
+- `CODEX_HOME` overrides `~/.codex`; `CODEX_ACCESS_TOKEN` /
+  `CODEX_ACCOUNT_ID` override the file (multi-account setups, tests).
+- `CODEX_BASE_URL` overrides `https://chatgpt.com/backend-api` (debugging).
+- API-key mode (`OPENAI_API_KEY` in `auth.json`) has no usage endpoint and is
+  reported as not configured.
+
 ## Response shape
 
 `GET /quota` returns per-provider **billing** (USD spend) and/or
@@ -68,15 +85,23 @@ systemctl status ai-quota-tracker
 
 ```json
 {
-  "timestamp": 1757546400,
-  "ttl_seconds": 300,
+  "updated_at": 1757546400,
   "providers": {
     "anthropic": {
       "subscription": {
-        "plan": "claude",
+        "plan": "claude-code",
         "windows": [
           { "window": "5h", "used": 23.5, "used_percent": 23.5, "resets_at": 1757553600 },
           { "window": "weekly", "used": 41.2, "used_percent": 41.2, "resets_at": 1757805600 }
+        ]
+      }
+    },
+    "codex": {
+      "subscription": {
+        "plan": "pro",
+        "windows": [
+          { "window": "5h", "used": 15.0, "used_percent": 15.0, "resets_at": 1757553600, "window_seconds": 18000 },
+          { "window": "weekly", "used": 5.0, "used_percent": 5.0, "resets_at": 1757805600, "window_seconds": 604800 }
         ]
       }
     },
@@ -88,7 +113,8 @@ systemctl status ai-quota-tracker
         "reset_timestamp": 1758842400
       }
     }
-  }
+  },
+  "errors": {}
 }
 ```
 
@@ -97,7 +123,8 @@ surfaced in `errors` instead of failing the whole response.
 
 ## Adding a provider
 
-Implement the `QuotaProvider` trait in `src/main.rs`:
+Add a module under `src/providers/` implementing the `QuotaProvider` trait
+(see `src/providers/codex.rs` for a full example):
 
 ```rust
 struct MyProvider { /* api key, etc. */ }
@@ -112,7 +139,16 @@ impl QuotaProvider for MyProvider {
 }
 ```
 
-then add it to the `providers` vec in `main()`.
+then add it to the `providers` vec in `main()` and cover the parsing with
+unit tests (`cargo test`).
+
+## Development
+
+```bash
+cargo test                          # unit tests: parsing, auth loading, cache TTL
+cargo clippy --all-targets          # must be warning-free
+cargo fmt --check                   # rustfmt clean
+```
 
 ## Contributing
 
