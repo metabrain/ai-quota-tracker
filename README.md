@@ -145,7 +145,14 @@ unit tests (`cargo test`).
 ## Development
 
 ```bash
-cargo test                          # 18+ unit tests: parsing, auth loading, cache TTL
+cargo test                          # unit tests: parsing, auth loading, cache TTL
 cargo clippy --all-targets          # must be warning-free
 cargo fmt --check                   # rustfmt clean
 ```
+
+## Contributing
+
+This README is the source of truth for how the daemon behaves — code and docs
+are kept in sync in the same change. All work is tracked by a pre-existing
+GitHub Issue. See [AGENTS.md](AGENTS.md) for the full rules (they apply to human
+and AI contributors alike).
