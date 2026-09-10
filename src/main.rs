@@ -18,9 +18,7 @@ use axum::{extract::State, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    env,
-    fmt,
-    fs,
+    env, fmt, fs,
     os::unix::fs::PermissionsExt,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -532,10 +530,7 @@ async fn main() {
     };
 
     // Process-level authorization: only this user may connect.
-    if let Err(e) = fs::set_permissions(
-        &config.socket_path,
-        fs::Permissions::from_mode(0o600),
-    ) {
+    if let Err(e) = fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)) {
         eprintln!("FATAL: cannot chmod 600 {}: {e}", config.socket_path);
         let _ = fs::remove_file(&config.socket_path);
         std::process::exit(1);
