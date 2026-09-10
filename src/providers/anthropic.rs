@@ -2,14 +2,29 @@
 //!
 //! Calls `GET https://api.anthropic.com/api/oauth/usage` with the OAuth
 //! access token the Claude Code CLI stores in `~/.claude/.credentials.json`
-//! (or `ANTHROPIC_OAUTH_TOKEN`). Maps the 5h / 7d utilization windows onto
-//! the shared model. Read-only: never touches the CLI's credential file.
+//! (or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_OAUTH_TOKEN`). Maps the 5h / 7d
+//! utilization windows onto the shared model. Read-only: never touches the
+//! CLI's credential file and never refreshes tokens.
 
 use super::{demo_quota, ProviderError, ProviderQuota, QuotaProvider};
 use crate::model::{unix_now, SubscriptionQuota, UsageWindow};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::env;
+use serde_json::Value;
+use std::{env, fs, path::PathBuf};
+
+/// The usage endpoint rate-limits non-Claude-Code user agents aggressively
+/// (persistent 429s reported by community tooling), so we identify as the CLI.
+const CLAUDE_CODE_USER_AGENT: &str = "claude-code/2.1.0";
+
+/// Known usage buckets, in display order. Anything else in the payload is
+/// surfaced generically rather than dropped (the API grows new buckets).
+const KNOWN_WINDOWS: &[(&str, &str)] = &[
+    ("five_hour", "5h"),
+    ("seven_day", "weekly"),
+    ("seven_day_sonnet", "weekly (sonnet)"),
+    ("seven_day_opus", "weekly (opus)"),
+];
 
 pub(crate) struct AnthropicProvider {
     oauth_token: Option<String>,
@@ -18,52 +33,49 @@ pub(crate) struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub(crate) fn new(demo: bool) -> Self {
-        let oauth_token = env::var("ANTHROPIC_OAUTH_TOKEN")
-            .ok()
-            .filter(|t| !t.trim().is_empty())
-            .or_else(load_claude_oauth_token);
-        Self { oauth_token, demo }
+        Self {
+            oauth_token: load_oauth_token(),
+            demo,
+        }
     }
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ClaudeCredentialsFile {
     #[serde(default)]
     claude_ai_oauth: Option<ClaudeAiOauth>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ClaudeAiOauth {
     #[serde(default)]
     access_token: Option<String>,
 }
 
-/// Read the OAuth token the Claude Code CLI manages. Read-only.
-fn load_claude_oauth_token() -> Option<String> {
-    let home = env::var("HOME").ok()?;
-    let path = format!("{home}/.claude/.credentials.json");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let creds: ClaudeCredentialsFile = serde_json::from_str(&raw).ok()?;
-    creds
-        .claude_ai_oauth?
-        .access_token
-        .filter(|t| !t.trim().is_empty())
+fn token_from_env(vars: &[&str]) -> Option<String> {
+    vars.iter()
+        .find_map(|var| env::var(var).ok().filter(|t| !t.trim().is_empty()))
 }
 
-#[derive(Debug, Deserialize)]
-struct OauthUsageWindow {
-    #[serde(default)]
-    utilization: Option<f64>,
-    #[serde(default)]
-    resets_at: Option<String>,
+fn credentials_path() -> Option<PathBuf> {
+    env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".claude/.credentials.json"))
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct OauthUsageResponse {
-    #[serde(default)]
-    five_hour: Option<OauthUsageWindow>,
-    #[serde(default)]
-    seven_day: Option<OauthUsageWindow>,
+/// Token precedence: explicit env (`CLAUDE_CODE_OAUTH_TOKEN`, then the legacy
+/// `ANTHROPIC_OAUTH_TOKEN`) wins over the CLI-managed credential file.
+pub(crate) fn load_oauth_token() -> Option<String> {
+    token_from_env(&["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]).or_else(|| {
+        let raw = fs::read_to_string(credentials_path()?).ok()?;
+        let creds: ClaudeCredentialsFile = serde_json::from_str(&raw).ok()?;
+        creds
+            .claude_ai_oauth?
+            .access_token
+            .filter(|t| !t.trim().is_empty())
+    })
 }
 
 fn parse_resets_at(s: Option<&str>, now: u64) -> u64 {
@@ -75,16 +87,46 @@ fn parse_resets_at(s: Option<&str>, now: u64) -> u64 {
     .unwrap_or(now)
 }
 
-fn to_usage_window(label: &str, w: &OauthUsageWindow, now: u64) -> Option<UsageWindow> {
-    let used = w.utilization?;
+fn parse_window(label: &str, value: &Value, now: u64) -> Option<UsageWindow> {
+    let used = value.get("utilization")?.as_f64()?;
     Some(UsageWindow {
         window: label.to_string(),
         limit: None,
         used,
         used_percent: Some(used),
-        resets_at: parse_resets_at(w.resets_at.as_deref(), now),
+        resets_at: value
+            .get("resets_at")
+            .and_then(|v| v.as_str())
+            .map(|s| parse_resets_at(Some(s), now))
+            .unwrap_or(now),
         window_seconds: None,
     })
+}
+
+/// Parse the OAuth usage payload defensively: known buckets first in a stable
+/// order, then any extra buckets under their raw key. `null` buckets and
+/// malformed entries are skipped; `extra_usage` is not a window.
+pub(crate) fn parse_oauth_usage(body: &Value, now: u64) -> Vec<UsageWindow> {
+    let mut windows = Vec::new();
+    let Some(obj) = body.as_object() else {
+        return windows;
+    };
+    for (key, label) in KNOWN_WINDOWS {
+        if let Some(value) = obj.get(*key) {
+            if let Some(window) = parse_window(label, value, now) {
+                windows.push(window);
+            }
+        }
+    }
+    for (key, value) in obj {
+        if key == "extra_usage" || KNOWN_WINDOWS.iter().any(|(k, _)| k == key) {
+            continue;
+        }
+        if let Some(window) = parse_window(key, value, now) {
+            windows.push(window);
+        }
+    }
+    windows
 }
 
 #[async_trait]
@@ -100,7 +142,7 @@ impl QuotaProvider for AnthropicProvider {
                 return Ok(demo_quota(now));
             }
             return Err(ProviderError::NotConfigured(
-                "set ANTHROPIC_OAUTH_TOKEN or run `claude login`",
+                "set CLAUDE_CODE_OAUTH_TOKEN or run `claude login`",
             ));
         };
 
@@ -108,28 +150,27 @@ impl QuotaProvider for AnthropicProvider {
             .get("https://api.anthropic.com/api/oauth/usage")
             .bearer_auth(token)
             .header("anthropic-beta", "oauth-2025-04-20")
+            .header("User-Agent", CLAUDE_CODE_USER_AGENT)
             .send()
             .await
             .map_err(ProviderError::Http)?;
-        if !resp.status().is_success() {
-            return Err(ProviderError::Unexpected(format!(
-                "Anthropic usage API returned {}",
-                resp.status()
-            )));
-        }
-        let usage: OauthUsageResponse = resp.json().await.map_err(ProviderError::Http)?;
-
-        let mut windows = Vec::new();
-        if let Some(w) = &usage.five_hour {
-            if let Some(win) = to_usage_window("5h", w, now) {
-                windows.push(win);
+        match resp.status() {
+            s if s.is_success() => {}
+            reqwest::StatusCode::UNAUTHORIZED => {
+                // Access tokens expire ~hourly; the CLI refreshes them when it
+                // runs. We never redeem the refresh token ourselves.
+                return Err(ProviderError::NotConfigured(
+                    "Anthropic OAuth token expired or invalid: run `claude` (or `claude update`) to refresh it",
+                ));
+            }
+            s => {
+                return Err(ProviderError::Unexpected(format!(
+                    "Anthropic usage API returned {s}"
+                )))
             }
         }
-        if let Some(w) = &usage.seven_day {
-            if let Some(win) = to_usage_window("weekly", w, now) {
-                windows.push(win);
-            }
-        }
+        let body: Value = resp.json().await.map_err(ProviderError::Http)?;
+        let windows = parse_oauth_usage(&body, now);
 
         Ok(ProviderQuota {
             billing: None,
@@ -145,30 +186,89 @@ impl QuotaProvider for AnthropicProvider {
 mod tests {
     use super::*;
 
-    #[test]
-    fn window_mapping() {
-        let w = OauthUsageWindow {
-            utilization: Some(33.0),
-            resets_at: Some("2026-04-11T07:00:00+00:00".to_string()),
-        };
-        let win = to_usage_window("5h", &w, 1_000_000).unwrap();
-        assert_eq!(win.window, "5h");
-        assert_eq!(win.used_percent, Some(33.0));
-        assert!(win.resets_at > 1_000_000);
+    /// Serializes tests that mutate process-global env vars.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn usage_fixture() -> Value {
+        serde_json::json!({
+            "five_hour": {"utilization": 33.0, "resets_at": "2026-04-11T07:00:00.528743+00:00"},
+            "seven_day": {"utilization": 13.0, "resets_at": "2026-04-17T00:59:59.951719+00:00"},
+            "seven_day_opus": null,
+            "seven_day_sonnet": {"utilization": 1.0, "resets_at": "2026-04-16T03:00:00.951719+00:00"},
+            "seven_day_cowork": {"utilization": 7.5, "resets_at": null},
+            "extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null, "utilization": null}
+        })
     }
 
     #[test]
-    fn missing_utilization_is_skipped() {
-        let w = OauthUsageWindow {
-            utilization: None,
-            resets_at: None,
-        };
-        assert!(to_usage_window("5h", &w, 1_000_000).is_none());
+    fn parses_all_windows_in_stable_order() {
+        let windows = parse_oauth_usage(&usage_fixture(), 1_000_000);
+        let labels: Vec<&str> = windows.iter().map(|w| w.window.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["5h", "weekly", "weekly (sonnet)", "seven_day_cowork"]
+        );
+        assert_eq!(windows[0].used_percent, Some(33.0));
+        assert!(windows[0].resets_at > 1_000_000);
+        // null resets_at falls back to now
+        assert_eq!(windows[3].resets_at, 1_000_000);
+    }
+
+    #[test]
+    fn skips_null_and_malformed_buckets() {
+        let body = serde_json::json!({
+            "five_hour": null,
+            "seven_day": {"utilization": "lots"},
+            "extra_usage": {"is_enabled": true},
+        });
+        assert!(parse_oauth_usage(&body, 1_000_000).is_empty());
+        assert!(parse_oauth_usage(&serde_json::json!({}), 1_000_000).is_empty());
     }
 
     #[test]
     fn bad_timestamp_falls_back_to_now() {
         assert_eq!(parse_resets_at(Some("not-a-time"), 42), 42);
         assert_eq!(parse_resets_at(None, 42), 42);
+    }
+
+    #[test]
+    fn env_token_wins_over_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("claude-test-{}", std::process::id()));
+        let claude_dir = home.join(".claude");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(
+            claude_dir.join(".credentials.json"),
+            r#"{"claudeAiOauth": {"accessToken": "file-token"}}"#,
+        )
+        .unwrap();
+
+        env::set_var("HOME", &home);
+        env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+        env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        assert_eq!(load_oauth_token().as_deref(), Some("file-token"));
+
+        env::set_var("ANTHROPIC_OAUTH_TOKEN", "legacy-env-token");
+        assert_eq!(load_oauth_token().as_deref(), Some("legacy-env-token"));
+
+        env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "new-env-token");
+        assert_eq!(load_oauth_token().as_deref(), Some("new-env-token"));
+
+        env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+        env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn missing_everything_is_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::set_var(
+            "HOME",
+            std::env::temp_dir().join("claude-test-definitely-missing"),
+        );
+        env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+        env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        assert_eq!(load_oauth_token(), None);
     }
 }
