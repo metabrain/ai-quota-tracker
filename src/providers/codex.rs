@@ -12,7 +12,7 @@
 //! - `CODEX_ACCESS_TOKEN` / `CODEX_ACCOUNT_ID`
 //! - `CODEX_BASE_URL` (default `https://chatgpt.com/backend-api`)
 
-use super::{demo_quota, ProviderError, ProviderQuota, QuotaProvider};
+use super::{demo, ProviderError, ProviderQuota, QuotaProvider};
 use crate::model::{unix_now, BillingQuota, SubscriptionQuota, UsageWindow};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -217,7 +217,23 @@ impl QuotaProvider for CodexProvider {
             Ok(creds) => creds,
             Err(e) => {
                 if self.demo {
-                    return Ok(demo_quota(now));
+                    // ChatGPT subscription: 5h + weekly windows, no billing.
+                    return Ok(ProviderQuota {
+                        billing: None,
+                        subscription: Some(demo::subscription(
+                            "pro",
+                            vec![
+                                demo::window("5h", 34.0, 3 * 3600, Some(5 * 3600), now),
+                                demo::window(
+                                    "weekly",
+                                    12.0,
+                                    4 * 24 * 3600,
+                                    Some(7 * 24 * 3600),
+                                    now,
+                                ),
+                            ],
+                        )),
+                    });
                 }
                 return Err(e);
             }

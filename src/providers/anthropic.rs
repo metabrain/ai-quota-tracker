@@ -6,7 +6,7 @@
 //! utilization windows onto the shared model. Read-only: never touches the
 //! CLI's credential file and never refreshes tokens.
 
-use super::{demo_quota, ProviderError, ProviderQuota, QuotaProvider};
+use super::{demo, ProviderError, ProviderQuota, QuotaProvider};
 use crate::model::{unix_now, SubscriptionQuota, UsageWindow};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -139,7 +139,18 @@ impl QuotaProvider for AnthropicProvider {
         let now = unix_now();
         let Some(token) = &self.oauth_token else {
             if self.demo {
-                return Ok(demo_quota(now));
+                // Claude Code subscription: 5h + weekly utilization, no billing,
+                // no window_seconds (the OAuth endpoint doesn't report it).
+                return Ok(ProviderQuota {
+                    billing: None,
+                    subscription: Some(demo::subscription(
+                        "claude-code",
+                        vec![
+                            demo::window("5h", 23.5, 3 * 3600, None, now),
+                            demo::window("weekly", 41.2, 4 * 24 * 3600, None, now),
+                        ],
+                    )),
+                });
             }
             return Err(ProviderError::NotConfigured(
                 "set CLAUDE_CODE_OAUTH_TOKEN or run `claude login`",
