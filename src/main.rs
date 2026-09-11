@@ -40,18 +40,26 @@ pub(crate) struct Config {
     pub demo_mode: bool,
 }
 
+/// Parse a seconds-valued env var. Unset means the default; a *set* value
+/// that fails to parse logs a warning and falls back to the default so a
+/// typo doesn't silently change the daemon's behaviour.
+fn parse_secs_env(name: &str, default: u64) -> Duration {
+    match env::var(name) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(secs) => Duration::from_secs(secs),
+            Err(_) => {
+                warn!(var = %name, value = %raw, default, "invalid value, using default");
+                Duration::from_secs(default)
+            }
+        },
+        Err(_) => Duration::from_secs(default),
+    }
+}
+
 impl Config {
     pub(crate) fn from_env() -> Self {
-        let ttl = env::var("QUOTA_CACHE_TTL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(300));
-        let fetch_timeout = env::var("QUOTA_FETCH_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(15));
+        let ttl = parse_secs_env("QUOTA_CACHE_TTL_SECS", 300);
+        let fetch_timeout = parse_secs_env("QUOTA_FETCH_TIMEOUT_SECS", 15);
         Self {
             socket_path: env::var("QUOTA_SOCKET_PATH")
                 .unwrap_or_else(|_| "/dev/shm/ai_quota_cache.sock".to_string()),
@@ -190,4 +198,35 @@ async fn main() {
         Err(e) => warn!("could not remove socket {}: {e}", config.socket_path),
     }
     info!("shutdown complete");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes tests that mutate process-global env vars.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn env_parse_fallback_and_valid_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::remove_var("QUOTA_CACHE_TTL_SECS");
+        env::remove_var("QUOTA_FETCH_TIMEOUT_SECS");
+        assert_eq!(Config::from_env().ttl, Duration::from_secs(300));
+        assert_eq!(Config::from_env().fetch_timeout, Duration::from_secs(15));
+
+        env::set_var("QUOTA_CACHE_TTL_SECS", "60");
+        env::set_var("QUOTA_FETCH_TIMEOUT_SECS", "5");
+        assert_eq!(Config::from_env().ttl, Duration::from_secs(60));
+        assert_eq!(Config::from_env().fetch_timeout, Duration::from_secs(5));
+
+        // Garbage values warn (visible in test logs) and fall back to defaults.
+        env::set_var("QUOTA_CACHE_TTL_SECS", "abc");
+        env::set_var("QUOTA_FETCH_TIMEOUT_SECS", "1.5");
+        assert_eq!(Config::from_env().ttl, Duration::from_secs(300));
+        assert_eq!(Config::from_env().fetch_timeout, Duration::from_secs(15));
+
+        env::remove_var("QUOTA_CACHE_TTL_SECS");
+        env::remove_var("QUOTA_FETCH_TIMEOUT_SECS");
+    }
 }
