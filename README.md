@@ -122,7 +122,7 @@ Muse details:
         "total_granted": 120.0,
         "total_used": 45.22,
         "remaining_balance": 74.78,
-        "reset_timestamp": 1758842400
+        "reset_timestamp": 0
       }
     }
   },
@@ -132,6 +132,12 @@ Muse details:
 
 Providers that fail keep serving their last-known-good metrics; the failure is
 surfaced in `errors` instead of failing the whole response.
+
+Note on the OpenAI billing block: `total_used` is trailing-30-day USD spend
+(a rolling window — the costs API reports spend, not your billing cycle), so
+`reset_timestamp` is `0`: a rolling window has no discrete reset and the true
+monthly cycle start is not observable. A `0` timestamp means unknown / no
+scheduled reset.
 
 ## Adding a provider
 

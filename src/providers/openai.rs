@@ -103,7 +103,10 @@ impl QuotaProvider for OpenAiProvider {
                 total_granted: self.granted_usd,
                 total_used: used,
                 remaining_balance: (self.granted_usd - used).max(0.0),
-                reset_timestamp: now + 86400 * 30,
+                // Rolling 30-day window: there is no discrete reset (the true
+                // monthly billing-cycle start is not observable), so 0 =
+                // unknown rather than a fabricated `now + 30d`.
+                reset_timestamp: 0,
             }),
             // ChatGPT subscription tiers expose no public usage API;
             // Codex/ChatGPT subscription limits live in the `codex` provider.
