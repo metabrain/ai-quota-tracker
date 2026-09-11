@@ -25,7 +25,9 @@ cargo build --release
 ## Run manually
 
 ```bash
-# demo mode (default): providers return synthetic metrics without API keys
+# demo mode (default): providers with no credentials return stand-in metrics
+# in their real response shape (billing for openai, subscription windows for
+# codex/anthropic); muse has no quota API so it still reports `unsupported`
 ./target/release/ai-quota-tracker
 
 # with real keys

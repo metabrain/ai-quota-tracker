@@ -10,7 +10,7 @@ pub(crate) mod codex;
 pub(crate) mod muse_code;
 pub(crate) mod openai;
 
-use crate::model::{BillingQuota, ProviderQuota, SubscriptionQuota, UsageWindow};
+use crate::model::ProviderQuota;
 use async_trait::async_trait;
 use std::fmt;
 
@@ -54,35 +54,46 @@ pub(crate) trait QuotaProvider: Send + Sync {
     async fn fetch(&self, client: &reqwest::Client) -> Result<ProviderQuota, ProviderError>;
 }
 
-/// Synthetic quota used when no credentials exist and demo mode is on.
-pub(crate) fn demo_quota(now: u64) -> ProviderQuota {
-    ProviderQuota {
-        billing: Some(BillingQuota {
+/// Stand-in data for demo mode (no credentials, `QUOTA_DEMO_MODE` on).
+///
+/// Each provider builds its demo payload from these so the fake output has the
+/// same *shape* it would return for real — billing-only for OpenAI,
+/// subscription windows for Codex/Anthropic — rather than every provider
+/// emitting one identical blob. Providers with no reportable quota at all
+/// (Muse) return their real `Unsupported`/`NotConfigured` error instead.
+pub(crate) mod demo {
+    use crate::model::{BillingQuota, SubscriptionQuota, UsageWindow};
+
+    pub(crate) fn billing(now: u64) -> BillingQuota {
+        BillingQuota {
             total_granted: 120.0,
             total_used: 37.42,
             remaining_balance: 82.58,
             reset_timestamp: now + 30 * 24 * 3600,
-        }),
-        subscription: Some(SubscriptionQuota {
-            plan: Some("demo".to_string()),
-            windows: vec![
-                UsageWindow {
-                    window: "5h".to_string(),
-                    limit: None,
-                    used: 34.0,
-                    used_percent: Some(34.0),
-                    resets_at: now + 3 * 3600,
-                    window_seconds: Some(5 * 3600),
-                },
-                UsageWindow {
-                    window: "weekly".to_string(),
-                    limit: None,
-                    used: 12.0,
-                    used_percent: Some(12.0),
-                    resets_at: now + 4 * 24 * 3600,
-                    window_seconds: Some(7 * 24 * 3600),
-                },
-            ],
-        }),
+        }
+    }
+
+    pub(crate) fn window(
+        label: &str,
+        used_percent: f64,
+        resets_in: u64,
+        window_seconds: Option<u64>,
+        now: u64,
+    ) -> UsageWindow {
+        UsageWindow {
+            window: label.to_string(),
+            limit: None,
+            used: used_percent,
+            used_percent: Some(used_percent),
+            resets_at: now + resets_in,
+            window_seconds,
+        }
+    }
+
+    pub(crate) fn subscription(plan: &str, windows: Vec<UsageWindow>) -> SubscriptionQuota {
+        SubscriptionQuota {
+            plan: Some(plan.to_string()),
+            windows,
+        }
     }
 }
