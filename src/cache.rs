@@ -14,7 +14,6 @@ use tracing::{error, info, warn};
 pub(crate) struct Cache {
     pub payload: Option<AiQuotaPayload>,
     pub last_updated: u64,
-    pub refreshing: bool,
 }
 
 pub(crate) struct AppState {
@@ -22,6 +21,11 @@ pub(crate) struct AppState {
     pub client: reqwest::Client,
     pub providers: Vec<Arc<dyn QuotaProvider>>,
     pub cache: Mutex<Cache>,
+    /// Single-flight guard for `refresh_cache`: concurrent callers queue on
+    /// this and reuse the winner's result instead of each hitting the
+    /// provider APIs. A held `MutexGuard` is released even on panic/unwind,
+    /// so a refresh can never wedge the daemon into a permanently stale state.
+    pub refresh_lock: Mutex<()>,
     pub started_at: u64,
 }
 
@@ -36,14 +40,22 @@ pub(crate) fn is_stale(cache: &Cache, ttl: Duration, now: u64) -> bool {
 /// Fetch every provider in parallel and rebuild the payload.
 /// Providers that fail keep their previous values; a provider that never
 /// succeeded lands in `errors`.
-pub(crate) async fn refresh_cache(state: &Arc<AppState>) {
-    // Only one refresh at a time; concurrent callers reuse the in-flight run.
-    {
-        let mut cache = state.cache.lock().await;
-        if cache.refreshing {
+///
+/// `force` = `false` (the lazy `/quota` path): after winning the single-flight
+/// lock, re-check the TTL and skip the fetch if a prior holder already
+/// refreshed — so a burst of expired requests coalesces onto one fetch.
+/// `force` = `true` (`/quota/refresh`, startup priming): always fetch, but
+/// still serialized behind the lock so it can't race a lazy refresh.
+pub(crate) async fn refresh_cache(state: &Arc<AppState>, force: bool) {
+    // Serialize refreshes. Callers block here rather than returning stale data,
+    // and the guard drops on any exit path (including unwind).
+    let _flight = state.refresh_lock.lock().await;
+
+    if !force {
+        let cache = state.cache.lock().await;
+        if !is_stale(&cache, state.config.ttl, unix_now()) {
             return;
         }
-        cache.refreshing = true;
     }
 
     let mut set = JoinSet::new();
@@ -96,7 +108,6 @@ pub(crate) async fn refresh_cache(state: &Arc<AppState>) {
         }
     }
     cache.last_updated = now;
-    cache.refreshing = false;
 }
 
 #[cfg(test)]
@@ -147,8 +158,8 @@ mod tests {
             cache: Mutex::new(Cache {
                 payload: None,
                 last_updated: 0,
-                refreshing: false,
             }),
+            refresh_lock: Mutex::new(()),
             started_at: unix_now(),
         })
     }
@@ -159,7 +170,6 @@ mod tests {
         let empty = Cache {
             payload: None,
             last_updated: 0,
-            refreshing: false,
         };
         assert!(is_stale(&empty, ttl, 1_000_000));
 
@@ -170,7 +180,6 @@ mod tests {
                 errors: HashMap::new(),
             }),
             last_updated: 900,
-            refreshing: false,
         };
         assert!(!is_stale(&fresh, ttl, 1_000));
         assert!(is_stale(&fresh, ttl, 1_200));
@@ -182,7 +191,7 @@ mod tests {
         let fail = Arc::new(AtomicBool::new(false));
         let state = test_state(300, &fail, &calls);
 
-        refresh_cache(&state).await;
+        refresh_cache(&state, true).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         let cache = state.cache.lock().await;
@@ -197,9 +206,9 @@ mod tests {
         let fail = Arc::new(AtomicBool::new(false));
         let state = test_state(300, &fail, &calls);
 
-        refresh_cache(&state).await;
+        refresh_cache(&state, true).await;
         fail.store(true, Ordering::SeqCst);
-        refresh_cache(&state).await;
+        refresh_cache(&state, true).await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let cache = state.cache.lock().await;
@@ -211,5 +220,41 @@ mod tests {
             payload.errors.get("stub").map(String::as_str),
             Some("not configured: boom")
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_lazy_refreshes_coalesce() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fail = Arc::new(AtomicBool::new(false));
+        let state = test_state(300, &fail, &calls);
+
+        // Five callers race a cold cache; the single-flight lock funnels them
+        // onto one fetch and the rest see a fresh cache and skip.
+        let tasks: Vec<_> = (0..5)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move { refresh_cache(&state, false).await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state.cache.lock().await.payload.is_some());
+    }
+
+    #[tokio::test]
+    async fn force_refresh_always_fetches() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fail = Arc::new(AtomicBool::new(false));
+        let state = test_state(300, &fail, &calls);
+
+        refresh_cache(&state, false).await; // 1: cold cache
+        refresh_cache(&state, false).await; // still fresh -> skipped
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        refresh_cache(&state, true).await; // forced -> fetches despite fresh cache
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

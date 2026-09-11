@@ -69,7 +69,7 @@ async fn get_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
         is_stale(&cache, state.config.ttl, now)
     };
     if needs_refresh {
-        refresh_cache(&state).await;
+        refresh_cache(&state, false).await;
     }
     let cache = state.cache.lock().await;
     // Refresh always sets the payload; fall back to an empty one only if the
@@ -86,7 +86,7 @@ async fn get_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
 }
 
 async fn refresh_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
-    refresh_cache(&state).await;
+    refresh_cache(&state, true).await;
     get_quota(State(state)).await
 }
 
@@ -138,13 +138,13 @@ async fn main() {
         cache: Mutex::new(Cache {
             payload: None,
             last_updated: 0,
-            refreshing: false,
         }),
+        refresh_lock: Mutex::new(()),
         started_at: unix_now(),
     });
 
     // Prime the cache before serving so the first request is instant.
-    refresh_cache(&state).await;
+    refresh_cache(&state, true).await;
 
     let app = Router::new()
         .route("/quota", get(get_quota))
