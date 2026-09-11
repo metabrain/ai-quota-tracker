@@ -135,6 +135,10 @@ Muse details:
 Providers that fail keep serving their last-known-good metrics; the failure is
 surfaced in `errors` instead of failing the whole response.
 
+Timestamp convention: a `resets_at` / `reset_timestamp` of `0` means the reset
+time is unknown or there is no scheduled reset (e.g. a provider that did not
+report one), as opposed to a window that just reset.
+
 ## Adding a provider
 
 Add a module under `src/providers/` implementing the `QuotaProvider` trait
