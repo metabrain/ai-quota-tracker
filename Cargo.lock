@@ -18,10 +18,12 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "http-body-util",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
