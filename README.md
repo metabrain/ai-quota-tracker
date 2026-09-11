@@ -68,6 +68,8 @@ systemctl status ai-quota-tracker
 
 ## Providers
 
+Currently supported (the `providers` map keys in `/quota`):
+
 | Key | Source | What it reports |
 | --- | ------ | --------------- |
 | `openai` | `OPENAI_API_KEY` (+ optional `OPENAI_GRANTED_USD`) | Platform billing: trailing-30d USD spend vs your configured grant |
@@ -94,6 +96,26 @@ Muse details:
   `auth.json` — `{"providers": {}}` means signed out), and billing
   precedence: `META_API_KEY` moves Muse onto per-token Model API billing
   ahead of any stored subscription session.
+
+### Not yet supported
+
+Candidates, roughly in order of how cleanly they'd fit. "Feasible" means a
+polling daemon can read a usage/billing number without a browser session or
+scraping.
+
+| Provider | Feasible? | Notes |
+| --- | --- | --- |
+| Google Gemini / AI Studio | partial | Cloud Billing API gives spend for a GCP project (needs a service account + `roles/billing.viewer`); AI Studio free-tier keys have no usage endpoint. |
+| Mistral (La Plateforme) | likely | Has a billing/usage area; needs confirmation of a stable API endpoint vs. dashboard-only. |
+| xAI (Grok) | likely | Console exposes credits/usage; API surface not yet verified here. |
+| OpenRouter | yes | `GET /api/v1/auth/key` returns `limit` / `usage` for the key — easy add. |
+| DeepSeek | likely | `GET /user/balance` returns granted/available credits. |
+| GitHub Copilot | no (individual) | No per-user quota API; org/enterprise billing is admin-only via the GitHub billing API. |
+| Cursor | no | Usage lives behind the dashboard/session; no documented API. |
+| AWS Bedrock / Azure OpenAI | project-level only | Spend comes from the cloud provider's Cost Explorer / Cost Management APIs, not the model endpoint. |
+
+Contributions welcome — open an issue first (see [Contributing](#contributing)),
+then implement `QuotaProvider` as in [Adding a provider](#adding-a-provider).
 
 ## Response shape
 
