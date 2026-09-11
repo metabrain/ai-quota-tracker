@@ -37,6 +37,9 @@ QUOTA_SOCKET_PATH=/dev/shm/ai_quota_cache.sock QUOTA_CACHE_TTL_SECS=300 \
 QUOTA_FETCH_TIMEOUT_SECS=15 ./target/release/ai-quota-tracker
 ```
 
+`QUOTA_CACHE_TTL_SECS` and `QUOTA_FETCH_TIMEOUT_SECS` take integer seconds; a
+set value that fails to parse logs a warning and falls back to the default.
+
 ## Query
 
 ```bash
