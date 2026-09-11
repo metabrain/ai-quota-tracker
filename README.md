@@ -11,9 +11,25 @@ socket — no TCP, no disk, no fuss.
 - **Lazy / pull-based caching:** provider APIs are only contacted when a local
   request arrives *and* the in-memory TTL has expired. Otherwise the daemon
   idles on the socket.
-- The socket is `chmod 600` — only the owning user can connect.
+- The socket is created `0600` (umask is tightened around `bind()` so there is
+  no world-readable window) — only the owning user can connect.
 - On `SIGINT`/`SIGTERM` the daemon shuts down gracefully and unlinks the
   socket file.
+
+## Security & credentials
+
+- **Access control is the socket mode.** Any process running as the socket
+  owner can read `/quota` (and every token-derived number in it). Keep the
+  socket on a per-user tmpfs; don't loosen the `0600`.
+- **The daemon reads provider CLI credential files, read-only.** With no env
+  override it will pick up `~/.codex/auth.json` (`codex login`),
+  `~/.claude/.credentials.json` (`claude login`) and the `muse` session file.
+  It never writes them and never refreshes tokens — that stays with each CLI.
+- **Those tokens are sent to the provider's own API** (`api.openai.com`,
+  `chatgpt.com`, `api.anthropic.com`) over TLS, and nowhere else. Nothing is
+  written to disk: the cache is RAM-only and the socket is on tmpfs.
+- Run it as **your** user (or a dedicated service user with its own copies of
+  the credentials) — not root, and not a user other people can `su` to.
 
 ## Build
 
