@@ -7,7 +7,11 @@
 
 use crate::model::{unix_now, AiQuotaPayload};
 use crate::providers::QuotaProvider;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{error, info, warn};
 
@@ -88,6 +92,13 @@ pub(crate) async fn refresh_cache(state: &Arc<AppState>, force: bool) {
     let mut cache = state.cache.lock().await;
     match &mut cache.payload {
         Some(existing) => {
+            // Providers that ran this round: successes landed in `providers`,
+            // failures in `errors`. Errors for providers that were NOT
+            // refreshed must be left alone — today every provider runs on
+            // every refresh, so the distinction is defensive, but it keeps the
+            // merge correct if subsets are ever refreshed.
+            let refreshed: HashSet<String> =
+                providers.keys().chain(errors.keys()).cloned().collect();
             // Preserve last-known-good data for providers that failed.
             for (name, quota) in providers {
                 existing.providers.insert(name, quota);
@@ -95,8 +106,11 @@ pub(crate) async fn refresh_cache(state: &Arc<AppState>, force: bool) {
             for name in errors.keys() {
                 existing.errors.insert(name.clone(), errors[name].clone());
             }
-            // Clear errors for providers that recovered.
-            existing.errors.retain(|name, _| errors.contains_key(name));
+            // Clear errors for providers that recovered this round; keep
+            // errors for providers that were not refreshed.
+            existing
+                .errors
+                .retain(|name, _| errors.contains_key(name) || !refreshed.contains(name));
             existing.updated_at = now;
         }
         None => {
@@ -256,5 +270,59 @@ mod tests {
 
         refresh_cache(&state, true).await; // forced -> fetches despite fresh cache
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_errors_for_unrefreshed_providers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fail = Arc::new(AtomicBool::new(false));
+        let state = test_state(300, &fail, &calls);
+
+        // Pre-seed an error for a provider that is not in this refresh round.
+        {
+            let mut cache = state.cache.lock().await;
+            cache.payload = Some(AiQuotaPayload {
+                updated_at: 100,
+                providers: HashMap::new(),
+                errors: [("ghost".to_string(), "old failure".to_string())]
+                    .into_iter()
+                    .collect(),
+            });
+            cache.last_updated = 100;
+        }
+
+        refresh_cache(&state, true).await;
+
+        let cache = state.cache.lock().await;
+        let payload = cache.payload.as_ref().unwrap();
+        // The refreshed provider landed normally...
+        assert!(payload.providers.contains_key("stub"));
+        assert!(!payload.errors.contains_key("stub"));
+        // ...and the unrefreshed provider's error was not cleared.
+        assert_eq!(
+            payload.errors.get("ghost").map(String::as_str),
+            Some("old failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_clears_error_for_recovered_provider() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fail = Arc::new(AtomicBool::new(true));
+        let state = test_state(300, &fail, &calls);
+
+        refresh_cache(&state, true).await;
+        {
+            let cache = state.cache.lock().await;
+            assert!(cache.payload.as_ref().unwrap().errors.contains_key("stub"));
+        }
+
+        fail.store(false, Ordering::SeqCst);
+        refresh_cache(&state, true).await;
+
+        let cache = state.cache.lock().await;
+        let payload = cache.payload.as_ref().unwrap();
+        assert!(payload.providers.contains_key("stub"));
+        assert!(payload.errors.is_empty());
     }
 }
