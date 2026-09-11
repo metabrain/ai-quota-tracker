@@ -137,17 +137,17 @@ pub(crate) fn usage_url() -> String {
     }
 }
 
-fn parse_window(label: &str, value: &serde_json::Value, now: u64) -> Option<UsageWindow> {
+/// Parse a rate-limit window defensively: `reset_at` may be absent, in which
+/// case `resets_at` is 0 (unknown) rather than the current time, so a client
+/// can tell "we don't know" apart from "this window just reset".
+fn parse_window(label: &str, value: &serde_json::Value) -> Option<UsageWindow> {
     let used = value.get("used_percent")?.as_f64()?;
     Some(UsageWindow {
         window: label.to_string(),
         limit: None,
         used,
         used_percent: Some(used),
-        resets_at: value
-            .get("reset_at")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(now),
+        resets_at: value.get("reset_at").and_then(|v| v.as_u64()).unwrap_or(0),
         window_seconds: value.get("limit_window_seconds").and_then(|v| v.as_u64()),
     })
 }
@@ -156,7 +156,7 @@ fn parse_window(label: &str, value: &serde_json::Value, now: u64) -> Option<Usag
 /// malformed windows are skipped, and the known `primary_window` /
 /// `secondary_window` keep their canonical "5h" / "weekly" labels. Any extra
 /// model-specific windows are surfaced under their raw key.
-pub(crate) fn parse_codex_usage(body: &serde_json::Value, now: u64) -> CodexUsage {
+pub(crate) fn parse_codex_usage(body: &serde_json::Value) -> CodexUsage {
     let plan = body
         .get("plan_type")
         .and_then(|v| v.as_str())
@@ -166,7 +166,7 @@ pub(crate) fn parse_codex_usage(body: &serde_json::Value, now: u64) -> CodexUsag
     if let Some(rate_limit) = body.get("rate_limit").and_then(|v| v.as_object()) {
         for (key, label) in [("primary_window", "5h"), ("secondary_window", "weekly")] {
             if let Some(value) = rate_limit.get(key) {
-                if let Some(window) = parse_window(label, value, now) {
+                if let Some(window) = parse_window(label, value) {
                     windows.push(window);
                 }
             }
@@ -175,7 +175,7 @@ pub(crate) fn parse_codex_usage(body: &serde_json::Value, now: u64) -> CodexUsag
             if key == "primary_window" || key == "secondary_window" {
                 continue;
             }
-            if let Some(window) = parse_window(key, value, now) {
+            if let Some(window) = parse_window(key, value) {
                 windows.push(window);
             }
         }
@@ -246,7 +246,7 @@ impl QuotaProvider for CodexProvider {
         }
 
         let body: serde_json::Value = resp.json().await.map_err(ProviderError::Http)?;
-        let usage = parse_codex_usage(&body, now);
+        let usage = parse_codex_usage(&body);
 
         // Credits balance semantics are undocumented; surfaced as a USD grant
         // so the number is visible rather than silently dropped.
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn parses_full_usage_response() {
-        let usage = parse_codex_usage(&usage_fixture(), 1_000_000);
+        let usage = parse_codex_usage(&usage_fixture());
         assert_eq!(usage.plan.as_deref(), Some("pro"));
         assert_eq!(usage.windows.len(), 3);
 
@@ -322,30 +322,30 @@ mod tests {
                 "secondary_window": {"used_percent": "lots", "reset_at": 1735920000},
             }
         });
-        let usage = parse_codex_usage(&body, 1_000_000);
+        let usage = parse_codex_usage(&body);
         assert!(usage.windows.is_empty());
         assert_eq!(usage.plan, None);
     }
 
     #[test]
     fn tolerates_missing_sections() {
-        let usage = parse_codex_usage(&serde_json::json!({"plan_type": "plus"}), 1_000_000);
+        let usage = parse_codex_usage(&serde_json::json!({"plan_type": "plus"}));
         assert_eq!(usage.plan.as_deref(), Some("plus"));
         assert!(usage.windows.is_empty());
         assert_eq!(usage.credits_balance, None);
 
-        let empty = parse_codex_usage(&serde_json::json!({}), 1_000_000);
+        let empty = parse_codex_usage(&serde_json::json!({}));
         assert_eq!(empty.plan, None);
         assert!(empty.windows.is_empty());
     }
 
     #[test]
-    fn missing_reset_defaults_to_now() {
+    fn missing_reset_is_unknown() {
         let body = serde_json::json!({
             "rate_limit": {"primary_window": {"used_percent": 10}}
         });
-        let usage = parse_codex_usage(&body, 1_000_000);
-        assert_eq!(usage.windows[0].resets_at, 1_000_000);
+        let usage = parse_codex_usage(&body);
+        assert_eq!(usage.windows[0].resets_at, 0);
         assert_eq!(usage.windows[0].window_seconds, None);
     }
 

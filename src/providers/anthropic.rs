@@ -78,27 +78,26 @@ pub(crate) fn load_oauth_token() -> Option<String> {
     })
 }
 
-fn parse_resets_at(s: Option<&str>, now: u64) -> u64 {
+/// Parse an RFC3339 reset timestamp. A missing or unparsable value becomes 0 —
+/// the "unknown" sentinel — so a client can tell "we don't know" apart from a
+/// window that just reset.
+fn parse_resets_at(s: Option<&str>) -> u64 {
     s.and_then(|text| {
         chrono::DateTime::parse_from_rfc3339(text)
             .ok()
             .map(|dt| dt.timestamp().max(0) as u64)
     })
-    .unwrap_or(now)
+    .unwrap_or(0)
 }
 
-fn parse_window(label: &str, value: &Value, now: u64) -> Option<UsageWindow> {
+fn parse_window(label: &str, value: &Value) -> Option<UsageWindow> {
     let used = value.get("utilization")?.as_f64()?;
     Some(UsageWindow {
         window: label.to_string(),
         limit: None,
         used,
         used_percent: Some(used),
-        resets_at: value
-            .get("resets_at")
-            .and_then(|v| v.as_str())
-            .map(|s| parse_resets_at(Some(s), now))
-            .unwrap_or(now),
+        resets_at: parse_resets_at(value.get("resets_at").and_then(|v| v.as_str())),
         window_seconds: None,
     })
 }
@@ -106,14 +105,14 @@ fn parse_window(label: &str, value: &Value, now: u64) -> Option<UsageWindow> {
 /// Parse the OAuth usage payload defensively: known buckets first in a stable
 /// order, then any extra buckets under their raw key. `null` buckets and
 /// malformed entries are skipped; `extra_usage` is not a window.
-pub(crate) fn parse_oauth_usage(body: &Value, now: u64) -> Vec<UsageWindow> {
+pub(crate) fn parse_oauth_usage(body: &Value) -> Vec<UsageWindow> {
     let mut windows = Vec::new();
     let Some(obj) = body.as_object() else {
         return windows;
     };
     for (key, label) in KNOWN_WINDOWS {
         if let Some(value) = obj.get(*key) {
-            if let Some(window) = parse_window(label, value, now) {
+            if let Some(window) = parse_window(label, value) {
                 windows.push(window);
             }
         }
@@ -122,7 +121,7 @@ pub(crate) fn parse_oauth_usage(body: &Value, now: u64) -> Vec<UsageWindow> {
         if key == "extra_usage" || KNOWN_WINDOWS.iter().any(|(k, _)| k == key) {
             continue;
         }
-        if let Some(window) = parse_window(key, value, now) {
+        if let Some(window) = parse_window(key, value) {
             windows.push(window);
         }
     }
@@ -170,7 +169,7 @@ impl QuotaProvider for AnthropicProvider {
             }
         }
         let body: Value = resp.json().await.map_err(ProviderError::Http)?;
-        let windows = parse_oauth_usage(&body, now);
+        let windows = parse_oauth_usage(&body);
 
         Ok(ProviderQuota {
             billing: None,
@@ -202,16 +201,16 @@ mod tests {
 
     #[test]
     fn parses_all_windows_in_stable_order() {
-        let windows = parse_oauth_usage(&usage_fixture(), 1_000_000);
+        let windows = parse_oauth_usage(&usage_fixture());
         let labels: Vec<&str> = windows.iter().map(|w| w.window.as_str()).collect();
         assert_eq!(
             labels,
             vec!["5h", "weekly", "weekly (sonnet)", "seven_day_cowork"]
         );
         assert_eq!(windows[0].used_percent, Some(33.0));
-        assert!(windows[0].resets_at > 1_000_000);
-        // null resets_at falls back to now
-        assert_eq!(windows[3].resets_at, 1_000_000);
+        assert!(windows[0].resets_at > 0);
+        // null resets_at is unknown, not "now"
+        assert_eq!(windows[3].resets_at, 0);
     }
 
     #[test]
@@ -221,14 +220,14 @@ mod tests {
             "seven_day": {"utilization": "lots"},
             "extra_usage": {"is_enabled": true},
         });
-        assert!(parse_oauth_usage(&body, 1_000_000).is_empty());
-        assert!(parse_oauth_usage(&serde_json::json!({}), 1_000_000).is_empty());
+        assert!(parse_oauth_usage(&body).is_empty());
+        assert!(parse_oauth_usage(&serde_json::json!({})).is_empty());
     }
 
     #[test]
-    fn bad_timestamp_falls_back_to_now() {
-        assert_eq!(parse_resets_at(Some("not-a-time"), 42), 42);
-        assert_eq!(parse_resets_at(None, 42), 42);
+    fn bad_timestamp_is_unknown() {
+        assert_eq!(parse_resets_at(Some("not-a-time")), 0);
+        assert_eq!(parse_resets_at(None), 0);
     }
 
     #[test]

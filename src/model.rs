@@ -33,7 +33,7 @@ pub(crate) struct UsageWindow {
     /// 0–100 when the provider reports a percentage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub used_percent: Option<f64>,
-    /// Unix timestamp when this window resets.
+    /// Unix timestamp when this window resets; 0 = unknown.
     pub resets_at: u64,
     /// Window length in seconds, when the provider reports it.
     #[serde(skip_serializing_if = "Option::is_none")]
