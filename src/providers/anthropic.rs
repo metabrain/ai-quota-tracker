@@ -296,7 +296,10 @@ mod tests {
         assert!(quota.billing.is_none());
         let sub = quota.subscription.unwrap();
         assert_eq!(sub.plan.as_deref(), Some("claude-code"));
-        assert_eq!(sub.windows.len(), 2);
+        // Ordered labels, matching the real OAuth endpoint's KNOWN_WINDOWS
+        // order (see parse_oauth_usage).
+        let labels: Vec<&str> = sub.windows.iter().map(|w| w.window.as_str()).collect();
+        assert_eq!(labels, vec!["5h", "weekly"]);
         assert!(sub.windows.iter().all(|w| w.window_seconds.is_none()));
     }
 }

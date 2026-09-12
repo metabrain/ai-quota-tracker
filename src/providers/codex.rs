@@ -485,8 +485,15 @@ mod tests {
         assert!(quota.billing.is_none());
         let sub = quota.subscription.unwrap();
         assert_eq!(sub.plan.as_deref(), Some("pro"));
-        assert_eq!(sub.windows.len(), 2);
-        assert!(sub.windows.iter().all(|w| w.window_seconds.is_some()));
+        // Ordered labels, matching the real usage API's primary/secondary
+        // window order (see parse_codex_usage).
+        let labels: Vec<&str> = sub.windows.iter().map(|w| w.window.as_str()).collect();
+        assert_eq!(labels, vec!["5h", "weekly"]);
+        // window_seconds values are fixed literals in demo::window() calls,
+        // not derived from `now` or the usage percentage, so they're stable
+        // to assert exactly (unlike resets_at/used_percent).
+        assert_eq!(sub.windows[0].window_seconds, Some(5 * 3600));
+        assert_eq!(sub.windows[1].window_seconds, Some(7 * 24 * 3600));
 
         env::remove_var("CODEX_HOME");
     }

@@ -70,6 +70,21 @@ impl Config {
     }
 }
 
+/// The `/quota` fallback contract: the cached payload when there is one, else
+/// a synthetic one carrying `now` and a single `daemon: "cache unavailable"`
+/// error. Refresh always sets the payload; `None` only happens if the lock
+/// raced a shutdown. Pulled out of `get_quota` as a pure function so the
+/// fallback shape has a direct, non-async, non-timing-dependent test.
+fn quota_or_fallback(payload: Option<AiQuotaPayload>, now: u64) -> AiQuotaPayload {
+    payload.unwrap_or(AiQuotaPayload {
+        updated_at: now,
+        providers: Default::default(),
+        errors: [("daemon".to_string(), "cache unavailable".to_string())]
+            .into_iter()
+            .collect(),
+    })
+}
+
 async fn get_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
     let now = unix_now();
     let needs_refresh = {
@@ -80,17 +95,7 @@ async fn get_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
         refresh_cache(&state, false).await;
     }
     let cache = state.cache.lock().await;
-    // Refresh always sets the payload; fall back to an empty one only if the
-    // lock raced a shutdown.
-    Json(
-        cache.payload.clone().unwrap_or(AiQuotaPayload {
-            updated_at: now,
-            providers: Default::default(),
-            errors: [("daemon".to_string(), "cache unavailable".to_string())]
-                .into_iter()
-                .collect(),
-        }),
-    )
+    Json(quota_or_fallback(cache.payload.clone(), now))
 }
 
 async fn refresh_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
@@ -250,6 +255,35 @@ mod tests {
 
         env::remove_var("QUOTA_CACHE_TTL_SECS");
         env::remove_var("QUOTA_FETCH_TIMEOUT_SECS");
+    }
+
+    #[test]
+    fn quota_or_fallback_synthesizes_cache_unavailable_payload_when_none() {
+        let payload = quota_or_fallback(None, 42);
+        assert_eq!(payload.updated_at, 42);
+        assert!(payload.providers.is_empty());
+        assert_eq!(
+            payload.errors.get("daemon").map(String::as_str),
+            Some("cache unavailable")
+        );
+        assert_eq!(payload.errors.len(), 1);
+    }
+
+    #[test]
+    fn quota_or_fallback_preserves_cached_payload_when_some() {
+        let cached = AiQuotaPayload {
+            updated_at: 100,
+            providers: [("stub".to_string(), ProviderQuota::default())]
+                .into_iter()
+                .collect(),
+            errors: Default::default(),
+        };
+        let payload = quota_or_fallback(Some(cached), 999);
+        // The cached payload wins outright: its own updated_at, providers,
+        // and (empty) errors — never the fallback's synthetic values.
+        assert_eq!(payload.updated_at, 100);
+        assert!(payload.providers.contains_key("stub"));
+        assert!(payload.errors.is_empty());
     }
 
     use crate::model::{BillingQuota, ProviderQuota};
