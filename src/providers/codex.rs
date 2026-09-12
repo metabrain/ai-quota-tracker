@@ -462,4 +462,39 @@ mod tests {
         env::remove_var("CODEX_HOME");
         fs::remove_dir_all(&dir).ok();
     }
+
+    // ENV_LOCK is a plain std Mutex held across the `.await` below on purpose:
+    // the demo branch never actually awaits internally (it returns before any
+    // I/O), so this only serializes against other tests' env var mutations.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn demo_mode_returns_subscription_with_window_seconds() {
+        // Matches the real path: no billing block, and (unlike Anthropic's
+        // OAuth endpoint) Codex's usage API does report window_seconds.
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::set_var(
+            "CODEX_HOME",
+            std::env::temp_dir().join("codex-test-demo-no-creds"),
+        );
+        env::remove_var("CODEX_ACCESS_TOKEN");
+
+        let provider = CodexProvider { demo: true };
+        let client = reqwest::Client::builder().build().unwrap();
+        let quota = provider.fetch(&client).await.unwrap();
+
+        assert!(quota.billing.is_none());
+        let sub = quota.subscription.unwrap();
+        assert_eq!(sub.plan.as_deref(), Some("pro"));
+        // Ordered labels, matching the real usage API's primary/secondary
+        // window order (see parse_codex_usage).
+        let labels: Vec<&str> = sub.windows.iter().map(|w| w.window.as_str()).collect();
+        assert_eq!(labels, vec!["5h", "weekly"]);
+        // window_seconds values are fixed literals in demo::window() calls,
+        // not derived from `now` or the usage percentage, so they're stable
+        // to assert exactly (unlike resets_at/used_percent).
+        assert_eq!(sub.windows[0].window_seconds, Some(5 * 3600));
+        assert_eq!(sub.windows[1].window_seconds, Some(7 * 24 * 3600));
+
+        env::remove_var("CODEX_HOME");
+    }
 }

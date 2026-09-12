@@ -210,4 +210,19 @@ mod tests {
         assert_eq!(billing.reset_timestamp, 0);
         assert_eq!(billing.remaining_balance, 0.0);
     }
+
+    #[tokio::test]
+    async fn demo_mode_returns_billing_only_no_subscription() {
+        // Matches the real path: OpenAI has no ChatGPT subscription API, so
+        // both real and demo output carry billing but never a subscription.
+        let provider = OpenAiProvider {
+            api_key: None,
+            granted_usd: 0.0,
+            demo: true,
+        };
+        let client = reqwest::Client::builder().build().unwrap();
+        let quota = provider.fetch(&client).await.unwrap();
+        assert!(quota.billing.is_some());
+        assert!(quota.subscription.is_none());
+    }
 }

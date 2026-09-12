@@ -281,4 +281,25 @@ mod tests {
         env::remove_var("ANTHROPIC_OAUTH_TOKEN");
         assert_eq!(load_oauth_token(), None);
     }
+
+    #[tokio::test]
+    async fn demo_mode_returns_subscription_without_window_seconds() {
+        // Matches the real path: no billing block, and (unlike Codex's usage
+        // API) the OAuth usage endpoint never reports window_seconds.
+        let provider = AnthropicProvider {
+            oauth_token: None,
+            demo: true,
+        };
+        let client = reqwest::Client::builder().build().unwrap();
+        let quota = provider.fetch(&client).await.unwrap();
+
+        assert!(quota.billing.is_none());
+        let sub = quota.subscription.unwrap();
+        assert_eq!(sub.plan.as_deref(), Some("claude-code"));
+        // Ordered labels, matching the real OAuth endpoint's KNOWN_WINDOWS
+        // order (see parse_oauth_usage).
+        let labels: Vec<&str> = sub.windows.iter().map(|w| w.window.as_str()).collect();
+        assert_eq!(labels, vec!["5h", "weekly"]);
+        assert!(sub.windows.iter().all(|w| w.window_seconds.is_none()));
+    }
 }
