@@ -5,8 +5,13 @@ Surfaces `ai-quota-tracker`'s `/quota` data directly in the
 agent pane — so you can see 5h/weekly usage and the next reset without
 leaving your terminal workspace manager.
 
-Herdr has no plugin system for custom sidebar widgets. This works entirely
-through two things Herdr's CLI/config already expose:
+Herdr does have a plugin system (`herdr plugin install`/`link`), but as of
+v0.9.0 it's confined to invokable actions and a narrow set of lifecycle
+events (e.g. `worktree.created`) — its own docs say "native non-terminal
+plugin UI" and runtime action registration are explicitly out of scope for
+plugin v1. There's no plugin hook for sidebar UI, no periodic/poll hook, and
+no plugin-side equivalent of `report-metadata`. So this integration instead
+works entirely through two things Herdr's CLI/config already expose:
 
 - `herdr pane report-metadata <pane_id> --token name=value` — attaches
   arbitrary key/value "tokens" to a pane, which Herdr keeps until they
@@ -32,41 +37,31 @@ per-pane configuration needed.
 
 ## Setup
 
-1. Copy (or symlink) the script somewhere on `PATH`, e.g.:
+Make sure `ai-quota-tracker` itself is running first (see the top-level
+[README](../../README.md#run-manually)), then run the installer:
 
-   ```bash
-   cp herdr-quota-poller.sh ~/.local/bin/
-   chmod +x ~/.local/bin/herdr-quota-poller.sh
-   ```
+```bash
+./install.sh
+```
 
-2. Add a sidebar row for the `$quota` token to `~/.config/herdr/config.toml`:
+It's idempotent — re-run it any time after pulling repo changes to this
+integration, or after editing `herdr-quota-poller.sh` in place here. Each
+run:
 
-   ```toml
-   [ui.sidebar.agents]
-   rows = [["state_icon", "machine", "workspace", "tab"], ["agent"], ["$quota"]]
-   ```
-
-   (Adjust the other rows to match your existing config — only the
-   `["$quota"]` row is required for this integration. Putting it on its own
-   row, rather than appending it to the `agent` row, keeps it readable.)
-
-3. Reload Herdr's config without restarting your session:
-
-   ```bash
-   herdr server reload-config
-   ```
-
-4. Make sure `ai-quota-tracker` itself is running (see the top-level
-   [README](../../README.md#run-manually)), then start the poller:
-
-   ```bash
-   nohup ~/.local/bin/herdr-quota-poller.sh > /tmp/herdr-quota-poller.log 2>&1 &
-   disown
-   ```
+1. Copies `herdr-quota-poller.sh` into `~/.local/bin/` (overwriting any
+   previous copy — this directory is the source of truth, not `~/.local/bin`).
+2. Appends the `[ui.sidebar.agents]` `$quota` row to
+   `~/.config/herdr/config.toml` if it isn't already configured. It never
+   edits an existing `[ui.sidebar.agents]` block for you — if one exists
+   without `$quota`, it prints the snippet to add by hand.
+3. Restarts the poller in the background, logging to
+   `~/.local/state/herdr-quota-poller/poller.log`.
+4. Runs `herdr server reload-config`.
+5. Warns if the daemon's socket isn't present.
 
 Neither the daemon nor the poller is a systemd/user service by default —
-both are plain background processes here and won't survive a reboot. Wrap
-either in a systemd `--user` unit if you want that.
+both are plain background processes and won't survive a reboot. Wrap either
+in a systemd `--user` unit if you want that; `install.sh` doesn't do this.
 
 ## Configuration
 
@@ -92,7 +87,7 @@ Common tweaks:
 - Add a warning marker above a threshold, e.g. prefix with `⚠` when
   `used_percent >= 90`.
 
-After editing, restart the poller (`pkill -f herdr-quota-poller.sh`, then
-relaunch as in step 4). No `herdr server reload-config` is needed for
-wording-only changes — that's only required when the `config.toml` row
-layout itself changes.
+After editing, just re-run `./install.sh` to redeploy and restart the
+poller. No `herdr server reload-config` is needed for wording-only changes
+— that's only required when the `config.toml` row layout itself changes,
+which `install.sh` also handles on first install.
