@@ -33,7 +33,7 @@ pub(crate) struct UsageWindow {
     /// 0–100 when the provider reports a percentage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub used_percent: Option<f64>,
-    /// Unix timestamp when this window resets.
+    /// Unix timestamp when this window resets; 0 = unknown.
     pub resets_at: u64,
     /// Window length in seconds, when the provider reports it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,7 +45,6 @@ pub(crate) struct UsageWindow {
 pub(crate) struct SubscriptionQuota {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    #[serde(default)]
     pub windows: Vec<UsageWindow>,
 }
 
@@ -63,7 +62,6 @@ pub(crate) struct ProviderQuota {
 pub(crate) struct AiQuotaPayload {
     pub updated_at: u64,
     pub providers: std::collections::HashMap<String, ProviderQuota>,
-    #[serde(default)]
     pub errors: std::collections::HashMap<String, String>,
 }
 

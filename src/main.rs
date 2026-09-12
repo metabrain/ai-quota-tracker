@@ -40,18 +40,26 @@ pub(crate) struct Config {
     pub demo_mode: bool,
 }
 
+/// Parse a seconds-valued env var. Unset means the default; a *set* value
+/// that fails to parse logs a warning and falls back to the default so a
+/// typo doesn't silently change the daemon's behaviour.
+fn parse_secs_env(name: &str, default: u64) -> Duration {
+    match env::var(name) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(secs) => Duration::from_secs(secs),
+            Err(_) => {
+                warn!(var = %name, value = %raw, default, "invalid value, using default");
+                Duration::from_secs(default)
+            }
+        },
+        Err(_) => Duration::from_secs(default),
+    }
+}
+
 impl Config {
     pub(crate) fn from_env() -> Self {
-        let ttl = env::var("QUOTA_CACHE_TTL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(300));
-        let fetch_timeout = env::var("QUOTA_FETCH_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(15));
+        let ttl = parse_secs_env("QUOTA_CACHE_TTL_SECS", 300);
+        let fetch_timeout = parse_secs_env("QUOTA_FETCH_TIMEOUT_SECS", 15);
         Self {
             socket_path: env::var("QUOTA_SOCKET_PATH")
                 .unwrap_or_else(|_| "/dev/shm/ai_quota_cache.sock".to_string()),
@@ -69,7 +77,7 @@ async fn get_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
         is_stale(&cache, state.config.ttl, now)
     };
     if needs_refresh {
-        refresh_cache(&state).await;
+        refresh_cache(&state, false).await;
     }
     let cache = state.cache.lock().await;
     // Refresh always sets the payload; fall back to an empty one only if the
@@ -86,7 +94,7 @@ async fn get_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
 }
 
 async fn refresh_quota(State(state): State<Arc<AppState>>) -> Json<AiQuotaPayload> {
-    refresh_cache(&state).await;
+    refresh_cache(&state, true).await;
     get_quota(State(state)).await
 }
 
@@ -98,6 +106,36 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "cache_updated_at": cache.payload.as_ref().map(|p| p.updated_at),
         "providers": state.providers.iter().map(|p| p.name()).collect::<Vec<_>>(),
     }))
+}
+
+/// Bind the Unix socket so it is `0600` from the instant it exists.
+///
+/// `bind(2)` applies the process umask to the new socket inode, so a plain
+/// `bind` then `chmod` leaves a window where the socket is reachable with
+/// umask-default perms — and it lives on a world-writable tmpfs. Tightening
+/// umask to `0o177` around the bind closes that window; the explicit
+/// `set_permissions` afterwards is a backstop. Startup is single-threaded in
+/// practice (only our own tasks have run, none creating mode-sensitive files),
+/// so the brief global umask change is safe.
+fn bind_socket_0600(path: &str) -> UnixListener {
+    let prev_umask = unsafe { libc::umask(0o177) };
+    let bound = UnixListener::bind(path);
+    unsafe { libc::umask(prev_umask) };
+
+    let listener = match bound {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("FATAL: cannot bind {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Backstop: only this user may connect.
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        eprintln!("FATAL: cannot chmod 600 {path}: {e}");
+        let _ = fs::remove_file(path);
+        std::process::exit(1);
+    }
+    listener
 }
 
 #[tokio::main]
@@ -138,13 +176,13 @@ async fn main() {
         cache: Mutex::new(Cache {
             payload: None,
             last_updated: 0,
-            refreshing: false,
         }),
+        refresh_lock: Mutex::new(()),
         started_at: unix_now(),
     });
 
     // Prime the cache before serving so the first request is instant.
-    refresh_cache(&state).await;
+    refresh_cache(&state, true).await;
 
     let app = Router::new()
         .route("/quota", get(get_quota))
@@ -153,19 +191,7 @@ async fn main() {
         .with_state(state);
 
     let _ = fs::remove_file(&config.socket_path);
-    let listener = match UnixListener::bind(&config.socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("FATAL: cannot bind {}: {e}", config.socket_path);
-            std::process::exit(1);
-        }
-    };
-    // Process-level authorization: only this user may connect.
-    if let Err(e) = fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600)) {
-        eprintln!("FATAL: cannot chmod 600 {}: {e}", config.socket_path);
-        let _ = fs::remove_file(&config.socket_path);
-        std::process::exit(1);
-    }
+    let listener = bind_socket_0600(&config.socket_path);
     info!(socket = %config.socket_path, "listening on unix socket");
 
     let shutdown = async {
@@ -190,4 +216,35 @@ async fn main() {
         Err(e) => warn!("could not remove socket {}: {e}", config.socket_path),
     }
     info!("shutdown complete");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes tests that mutate process-global env vars.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn env_parse_fallback_and_valid_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        env::remove_var("QUOTA_CACHE_TTL_SECS");
+        env::remove_var("QUOTA_FETCH_TIMEOUT_SECS");
+        assert_eq!(Config::from_env().ttl, Duration::from_secs(300));
+        assert_eq!(Config::from_env().fetch_timeout, Duration::from_secs(15));
+
+        env::set_var("QUOTA_CACHE_TTL_SECS", "60");
+        env::set_var("QUOTA_FETCH_TIMEOUT_SECS", "5");
+        assert_eq!(Config::from_env().ttl, Duration::from_secs(60));
+        assert_eq!(Config::from_env().fetch_timeout, Duration::from_secs(5));
+
+        // Garbage values warn (visible in test logs) and fall back to defaults.
+        env::set_var("QUOTA_CACHE_TTL_SECS", "abc");
+        env::set_var("QUOTA_FETCH_TIMEOUT_SECS", "1.5");
+        assert_eq!(Config::from_env().ttl, Duration::from_secs(300));
+        assert_eq!(Config::from_env().fetch_timeout, Duration::from_secs(15));
+
+        env::remove_var("QUOTA_CACHE_TTL_SECS");
+        env::remove_var("QUOTA_FETCH_TIMEOUT_SECS");
+    }
 }

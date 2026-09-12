@@ -18,8 +18,7 @@
 //! so mere existence (or non-zero size) of the file is not enough.
 //! Read-only: login/logout stay entirely with the `muse` CLI.
 
-use super::{demo_quota, ProviderError, ProviderQuota, QuotaProvider};
-use crate::model::unix_now;
+use super::{ProviderError, ProviderQuota, QuotaProvider};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -38,13 +37,14 @@ pub(crate) struct MuseState {
     pub meta_api_key: bool,
 }
 
-pub(crate) struct MuseProvider {
-    demo: bool,
-}
+pub(crate) struct MuseProvider;
 
 impl MuseProvider {
-    pub(crate) fn new(demo: bool) -> Self {
-        Self { demo }
+    /// Takes `demo` for a uniform constructor across providers, but Muse
+    /// ignores it: there is no quota signal to synthesize, so demo mode would
+    /// only produce misleading data. See [`status`].
+    pub(crate) fn new(_demo: bool) -> Self {
+        Self
     }
 }
 
@@ -112,12 +112,10 @@ pub(crate) fn detect_state() -> MuseState {
 }
 
 /// Pure status decision, factored out for testing. Never fabricates quota:
-/// anything other than "not configured" is an explicit `Unsupported`.
-pub(crate) fn status(
-    state: &MuseState,
-    demo: bool,
-    now: u64,
-) -> Result<ProviderQuota, ProviderError> {
+/// there is no Muse quota endpoint, so this only ever returns `Unsupported`
+/// (configured but nothing to report) or `NotConfigured` (no session) — demo
+/// mode included.
+pub(crate) fn status(state: &MuseState) -> Result<ProviderQuota, ProviderError> {
     if state.signed_in || state.meta_api_key {
         let mut detail = NO_QUOTA_API.to_string();
         if state.meta_api_key {
@@ -128,9 +126,6 @@ pub(crate) fn status(
             detail.push_str("; signed-in session detected");
         }
         return Err(ProviderError::Unsupported(detail));
-    }
-    if demo {
-        return Ok(demo_quota(now));
     }
     if !state.cli_installed {
         return Err(ProviderError::NotConfigured(
@@ -149,7 +144,7 @@ impl QuotaProvider for MuseProvider {
     }
 
     async fn fetch(&self, _client: &reqwest::Client) -> Result<ProviderQuota, ProviderError> {
-        status(&detect_state(), self.demo, unix_now())
+        status(&detect_state())
     }
 }
 
@@ -222,7 +217,7 @@ mod tests {
     #[test]
     fn status_messages() {
         // Signed in but no quota endpoint: explicit unsupported, no fake data.
-        let err = status(&state(true, false, true), false, 1_000_000).unwrap_err();
+        let err = status(&state(true, false, true)).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.starts_with("unsupported: Muse exposes no quota API"),
@@ -231,22 +226,28 @@ mod tests {
         assert!(msg.contains("signed-in session detected"), "{msg}");
 
         // META_API_KEY billing precedence is surfaced.
-        let err = status(&state(false, true, true), false, 1_000_000).unwrap_err();
+        let err = status(&state(false, true, true)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unsupported:"), "{msg}");
         assert!(msg.contains("META_API_KEY"), "{msg}");
         assert!(msg.contains("per-token"), "{msg}");
 
         // Nothing configured: actionable hints, distinct cases.
-        let err = status(&state(false, false, false), false, 1_000_000).unwrap_err();
+        let err = status(&state(false, false, false)).unwrap_err();
         assert!(err.to_string().contains("muse login"), "{err}");
-        let err = status(&state(false, false, true), false, 1_000_000).unwrap_err();
+        assert!(err.to_string().contains("install"), "{err}");
+        let err = status(&state(false, false, true)).unwrap_err();
         assert!(err.to_string().contains("muse login"), "{err}");
         assert!(!err.to_string().contains("install"), "{err}");
+    }
 
-        // Demo mode still yields stand-in data when nothing is configured.
-        assert!(status(&state(false, false, false), true, 1_000_000).is_ok());
-        // ...but never when a real session exists.
-        assert!(status(&state(true, false, true), true, 1_000_000).is_err());
+    #[test]
+    fn demo_mode_never_fabricates_muse_quota() {
+        // Muse has no quota endpoint, so demo mode can't stand anything in:
+        // every state is an error regardless of the daemon's demo flag.
+        assert!(status(&state(false, false, false)).is_err());
+        assert!(status(&state(false, false, true)).is_err());
+        assert!(status(&state(true, false, true)).is_err());
+        assert!(status(&state(false, true, true)).is_err());
     }
 }

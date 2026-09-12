@@ -11,9 +11,25 @@ socket — no TCP, no disk, no fuss.
 - **Lazy / pull-based caching:** provider APIs are only contacted when a local
   request arrives *and* the in-memory TTL has expired. Otherwise the daemon
   idles on the socket.
-- The socket is `chmod 600` — only the owning user can connect.
+- The socket is created `0600` (umask is tightened around `bind()` so there is
+  no world-readable window) — only the owning user can connect.
 - On `SIGINT`/`SIGTERM` the daemon shuts down gracefully and unlinks the
   socket file.
+
+## Security & credentials
+
+- **Access control is the socket mode.** Any process running as the socket
+  owner can read `/quota` (and every token-derived number in it). Keep the
+  socket on a per-user tmpfs; don't loosen the `0600`.
+- **The daemon reads provider CLI credential files, read-only.** With no env
+  override it will pick up `~/.codex/auth.json` (`codex login`),
+  `~/.claude/.credentials.json` (`claude login`) and the `muse` session file.
+  It never writes them and never refreshes tokens — that stays with each CLI.
+- **Those tokens are sent to the provider's own API** (`api.openai.com`,
+  `chatgpt.com`, `api.anthropic.com`) over TLS, and nowhere else. Nothing is
+  written to disk: the cache is RAM-only and the socket is on tmpfs.
+- Run it as **your** user (or a dedicated service user with its own copies of
+  the credentials) — not root, and not a user other people can `su` to.
 
 ## Build
 
@@ -25,7 +41,9 @@ cargo build --release
 ## Run manually
 
 ```bash
-# demo mode (default): providers return synthetic metrics without API keys
+# demo mode (default): providers with no credentials return stand-in metrics
+# in their real response shape (billing for openai, subscription windows for
+# codex/anthropic); muse has no quota API so it still reports `unsupported`
 ./target/release/ai-quota-tracker
 
 # with real keys
@@ -36,6 +54,9 @@ OPENAI_API_KEY=sk-... OPENAI_GRANTED_USD=120 QUOTA_DEMO_MODE=0 \
 QUOTA_SOCKET_PATH=/dev/shm/ai_quota_cache.sock QUOTA_CACHE_TTL_SECS=300 \
 QUOTA_FETCH_TIMEOUT_SECS=15 ./target/release/ai-quota-tracker
 ```
+
+`QUOTA_CACHE_TTL_SECS` and `QUOTA_FETCH_TIMEOUT_SECS` take integer seconds; a
+set value that fails to parse logs a warning and falls back to the default.
 
 ## Query
 
@@ -63,6 +84,8 @@ systemctl status ai-quota-tracker
 
 ## Providers
 
+Currently supported (the `providers` map keys in `/quota`):
+
 | Key | Source | What it reports |
 | --- | ------ | --------------- |
 | `openai` | `OPENAI_API_KEY` (+ optional `OPENAI_GRANTED_USD`) | Platform billing: trailing-30d USD spend vs your configured grant |
@@ -89,6 +112,26 @@ Muse details:
   `auth.json` — `{"providers": {}}` means signed out), and billing
   precedence: `META_API_KEY` moves Muse onto per-token Model API billing
   ahead of any stored subscription session.
+
+### Not yet supported
+
+Candidates, roughly in order of how cleanly they'd fit. "Feasible" means a
+polling daemon can read a usage/billing number without a browser session or
+scraping.
+
+| Provider | Feasible? | Notes |
+| --- | --- | --- |
+| Google Gemini / AI Studio | partial | Cloud Billing API gives spend for a GCP project (needs a service account + `roles/billing.viewer`); AI Studio free-tier keys have no usage endpoint. |
+| Mistral (La Plateforme) | likely | Has a billing/usage area; needs confirmation of a stable API endpoint vs. dashboard-only. |
+| xAI (Grok) | likely | Console exposes credits/usage; API surface not yet verified here. |
+| OpenRouter | yes | `GET /api/v1/auth/key` returns `limit` / `usage` for the key — easy add. |
+| DeepSeek | likely | `GET /user/balance` returns granted/available credits. |
+| GitHub Copilot | no (individual) | No per-user quota API; org/enterprise billing is admin-only via the GitHub billing API. |
+| Cursor | no | Usage lives behind the dashboard/session; no documented API. |
+| AWS Bedrock / Azure OpenAI | project-level only | Spend comes from the cloud provider's Cost Explorer / Cost Management APIs, not the model endpoint. |
+
+Contributions welcome — open an issue first (see [Contributing](#contributing)),
+then implement `QuotaProvider` as in [Adding a provider](#adding-a-provider).
 
 ## Response shape
 
@@ -133,11 +176,14 @@ Muse details:
 Providers that fail keep serving their last-known-good metrics; the failure is
 surfaced in `errors` instead of failing the whole response.
 
+Timestamp convention: a `resets_at` / `reset_timestamp` of `0` means the reset
+time is unknown or there is no scheduled reset (e.g. a provider that did not
+report one), as opposed to a window that just reset.
+
 Note on the OpenAI billing block: `total_used` is trailing-30-day USD spend
 (a rolling window — the costs API reports spend, not your billing cycle), so
 `reset_timestamp` is `0`: a rolling window has no discrete reset and the true
-monthly cycle start is not observable. A `0` timestamp means unknown / no
-scheduled reset.
+monthly cycle start is not observable.
 
 ## Adding a provider
 

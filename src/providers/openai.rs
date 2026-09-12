@@ -4,7 +4,7 @@
 //! standard `OPENAI_API_KEY`. There is no public ChatGPT subscription quota
 //! endpoint — Codex/ChatGPT subscription limits live in [`super::codex`].
 
-use super::{demo_quota, ProviderError, ProviderQuota, QuotaProvider};
+use super::{demo, ProviderError, ProviderQuota, QuotaProvider};
 use crate::model::{unix_now, BillingQuota};
 use async_trait::async_trait;
 use std::env;
@@ -74,7 +74,11 @@ impl QuotaProvider for OpenAiProvider {
         let now = unix_now();
         let Some(api_key) = &self.api_key else {
             if self.demo {
-                return Ok(demo_quota(now));
+                // OpenAI reports billing only — no subscription block.
+                return Ok(ProviderQuota {
+                    billing: Some(demo::billing(now)),
+                    subscription: None,
+                });
             }
             return Err(ProviderError::NotConfigured("set OPENAI_API_KEY"));
         };
