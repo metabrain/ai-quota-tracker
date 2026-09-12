@@ -206,6 +206,15 @@ impl QuotaProvider for MyProvider {
 then add it to the `providers` vec in `main()` and cover the parsing with
 unit tests (`cargo test`).
 
+## Integrations
+
+`/quota` is designed to be consumed by other tools, not just `curl`.
+Available integrations live under [`ide-integrations/`](ide-integrations/):
+
+| Tool | Path | What it does |
+| --- | --- | --- |
+| [Herdr](https://herdr.dev) | [`ide-integrations/herdr/`](ide-integrations/herdr/) | Surfaces per-agent 5h/weekly usage and reset countdown directly in the Herdr sidebar, next to each live `claude`/`codex` agent pane. |
+
 ## Development
 
 ```bash
