@@ -165,7 +165,7 @@ then implement `QuotaProvider` as in [Adding a provider](#adding-a-provider).
         "total_granted": 120.0,
         "total_used": 45.22,
         "remaining_balance": 74.78,
-        "reset_timestamp": 1758842400
+        "reset_timestamp": 0
       }
     }
   },
@@ -179,6 +179,11 @@ surfaced in `errors` instead of failing the whole response.
 Timestamp convention: a `resets_at` / `reset_timestamp` of `0` means the reset
 time is unknown or there is no scheduled reset (e.g. a provider that did not
 report one), as opposed to a window that just reset.
+
+Note on the OpenAI billing block: `total_used` is trailing-30-day USD spend
+(a rolling window — the costs API reports spend, not your billing cycle), so
+`reset_timestamp` is `0`: a rolling window has no discrete reset and the true
+monthly cycle start is not observable.
 
 ## Adding a provider
 
