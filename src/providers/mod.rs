@@ -100,3 +100,18 @@ pub(crate) mod demo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::demo;
+
+    #[test]
+    fn demo_billing_has_no_discrete_reset() {
+        // Regression test for #33: demo::billing() is OpenAI's demo-mode
+        // stand-in and must mirror the real provider's convention — a
+        // rolling 30-day window has no reset, so 0 (unknown), never a
+        // fabricated `now + 30d`.
+        let billing = demo::billing(1_700_000_000);
+        assert_eq!(billing.reset_timestamp, 0);
+    }
+}

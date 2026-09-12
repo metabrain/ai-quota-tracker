@@ -39,6 +39,22 @@ fn amount_value(item: &serde_json::Value) -> Option<f64> {
     item.get("amount")?.get("value")?.as_f64()
 }
 
+/// Build the billing block from a grant and trailing-30-day spend.
+///
+/// Extracted from `fetch` so the reset_timestamp convention — 0 (unknown),
+/// never a fabricated `now + 30d` — has one direct, non-HTTP test point.
+pub(crate) fn billing_from_used(granted_usd: f64, used: f64) -> BillingQuota {
+    BillingQuota {
+        total_granted: granted_usd,
+        total_used: used,
+        remaining_balance: (granted_usd - used).max(0.0),
+        // Rolling 30-day window: there is no discrete reset (the true
+        // monthly billing-cycle start is not observable), so 0 =
+        // unknown rather than a fabricated `now + 30d`.
+        reset_timestamp: 0,
+    }
+}
+
 pub(crate) struct OpenAiProvider {
     api_key: Option<String>,
     /// Monthly grant in USD, from OPENAI_GRANTED_USD (the usage API reports
@@ -103,15 +119,7 @@ impl QuotaProvider for OpenAiProvider {
         let body: serde_json::Value = resp.json().await.map_err(ProviderError::Http)?;
         let used = sum_costs(&body);
         Ok(ProviderQuota {
-            billing: Some(BillingQuota {
-                total_granted: self.granted_usd,
-                total_used: used,
-                remaining_balance: (self.granted_usd - used).max(0.0),
-                // Rolling 30-day window: there is no discrete reset (the true
-                // monthly billing-cycle start is not observable), so 0 =
-                // unknown rather than a fabricated `now + 30d`.
-                reset_timestamp: 0,
-            }),
+            billing: Some(billing_from_used(self.granted_usd, used)),
             // ChatGPT subscription tiers expose no public usage API;
             // Codex/ChatGPT subscription limits live in the `codex` provider.
             subscription: None,
@@ -181,5 +189,25 @@ mod tests {
         assert_eq!(sum_costs(&body), 0.0);
         assert_eq!(sum_costs(&serde_json::json!({})), 0.0);
         assert_eq!(sum_costs(&serde_json::json!({"data": "nope"})), 0.0);
+    }
+
+    #[test]
+    fn billing_from_used_has_no_discrete_reset() {
+        // Regression test for #33: a rolling 30-day window has no calendar
+        // reset, so reset_timestamp must be the 0 (unknown) sentinel, never
+        // a fabricated `now + 30d`, whatever the grant/spend values are.
+        let billing = billing_from_used(120.0, 45.22);
+        assert_eq!(billing.reset_timestamp, 0);
+        assert_eq!(billing.total_granted, 120.0);
+        assert_eq!(billing.total_used, 45.22);
+        assert!((billing.remaining_balance - 74.78).abs() < 1e-9);
+    }
+
+    #[test]
+    fn billing_from_used_clamps_remaining_balance_at_zero() {
+        // Spend past the configured grant must not go negative.
+        let billing = billing_from_used(10.0, 25.0);
+        assert_eq!(billing.reset_timestamp, 0);
+        assert_eq!(billing.remaining_balance, 0.0);
     }
 }
