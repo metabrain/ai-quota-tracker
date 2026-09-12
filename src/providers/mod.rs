@@ -64,12 +64,15 @@ pub(crate) trait QuotaProvider: Send + Sync {
 pub(crate) mod demo {
     use crate::model::{BillingQuota, SubscriptionQuota, UsageWindow};
 
-    pub(crate) fn billing(now: u64) -> BillingQuota {
+    pub(crate) fn billing(_now: u64) -> BillingQuota {
         BillingQuota {
             total_granted: 120.0,
             total_used: 37.42,
             remaining_balance: 82.58,
-            reset_timestamp: now + 30 * 24 * 3600,
+            // Matches the real OpenAI provider: a rolling 30-day window has
+            // no discrete reset, so 0 = unknown rather than a fabricated
+            // `now + 30d`.
+            reset_timestamp: 0,
         }
     }
 
