@@ -108,6 +108,14 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     }))
 }
 
+fn build_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/quota", get(get_quota))
+        .route("/quota/refresh", get(refresh_quota))
+        .route("/health", get(health))
+        .with_state(state)
+}
+
 /// Bind the Unix socket so it is `0600` from the instant it exists.
 ///
 /// `bind(2)` applies the process umask to the new socket inode, so a plain
@@ -184,11 +192,7 @@ async fn main() {
     // Prime the cache before serving so the first request is instant.
     refresh_cache(&state, true).await;
 
-    let app = Router::new()
-        .route("/quota", get(get_quota))
-        .route("/quota/refresh", get(refresh_quota))
-        .route("/health", get(health))
-        .with_state(state);
+    let app = build_router(state);
 
     let _ = fs::remove_file(&config.socket_path);
     let listener = bind_socket_0600(&config.socket_path);
@@ -246,5 +250,115 @@ mod tests {
 
         env::remove_var("QUOTA_CACHE_TTL_SECS");
         env::remove_var("QUOTA_FETCH_TIMEOUT_SECS");
+    }
+
+    use crate::model::{BillingQuota, ProviderQuota};
+    use crate::providers::ProviderError;
+    use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    struct StubProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl QuotaProvider for StubProvider {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        async fn fetch(&self, _client: &reqwest::Client) -> Result<ProviderQuota, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderQuota {
+                billing: Some(BillingQuota {
+                    total_granted: 10.0,
+                    total_used: 1.0,
+                    remaining_balance: 9.0,
+                    reset_timestamp: 0,
+                }),
+                subscription: None,
+            })
+        }
+    }
+
+    fn test_state(ttl_secs: u64) -> (Arc<AppState>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(AppState {
+            config: Config {
+                socket_path: "test.sock".to_string(),
+                ttl: Duration::from_secs(ttl_secs),
+                fetch_timeout: Duration::from_secs(1),
+                demo_mode: false,
+            },
+            client: reqwest::Client::builder().build().unwrap(),
+            providers: vec![Arc::new(StubProvider {
+                calls: calls.clone(),
+            })],
+            cache: Mutex::new(Cache {
+                payload: None,
+                last_updated: 0,
+            }),
+            refresh_lock: Mutex::new(()),
+            started_at: 12_345,
+        });
+        (state, calls)
+    }
+
+    async fn get(state: &Arc<AppState>, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = build_router(Arc::clone(state))
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn quota_refreshes_on_miss_then_serves_cache() {
+        let (state, calls) = test_state(300);
+
+        let (status, body) = get(&state, "/quota").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["providers"]["stub"]["billing"]["remaining_balance"],
+            9.0
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Second call within the TTL is served from cache, no extra fetch.
+        let (status, _) = get(&state, "/quota").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn quota_refetches_after_ttl_expires() {
+        let (state, calls) = test_state(0); // everything is immediately stale
+        get(&state, "/quota").await;
+        get(&state, "/quota").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn refresh_endpoint_forces_a_fetch() {
+        let (state, calls) = test_state(300);
+        get(&state, "/quota").await; // 1
+        get(&state, "/quota/refresh").await; // 2: forced despite fresh cache
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn health_reports_state() {
+        let (state, _) = test_state(300);
+        let (status, body) = get(&state, "/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["started_at"], 12_345);
+        assert_eq!(body["providers"], serde_json::json!(["stub"]));
+        assert!(body["cache_updated_at"].is_null());
     }
 }

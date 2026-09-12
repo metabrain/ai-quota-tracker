@@ -23,3 +23,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }   # ServiceExt::oneshot for handler tests
+http-body-util = "0.1"                             # collect response bodies in tests
